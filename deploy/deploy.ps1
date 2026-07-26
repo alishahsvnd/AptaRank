@@ -111,8 +111,9 @@ if (-not $SkipRestart) {
     ssh $RemoteHost "APTARANK_APP_DIR=~/$AppDir APTARANK_DATA_DIR=~/$DataDir bash ~/$AppDir/deploy/aptarank.sh restart"
 
     Step "Health check"
-    $health = ssh $RemoteHost "sleep 3; curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8501/ || echo failed"
-    if ($health -match "200") {
+    $health = (Invoke-Remote "sleep 3; curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8501/ 2>/dev/null || echo failed" | Select-Object -Last 1)
+    $health = "$health".Trim()
+    if ($health -eq "200") {
         Ok "dashboard responding"
     } else {
         Warn "health check returned '$health'. Check: ssh $RemoteHost 'tail -40 ~/$DataDir/logs/dashboard.log'"

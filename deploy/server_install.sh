@@ -52,25 +52,35 @@ else
 fi
 PY="$VENV_DIR/bin/python"
 "$PY" -m pip install --quiet --upgrade pip setuptools wheel cython
-"$PY" -m pip install --quiet -e "$APP_DIR[dashboard]"
-ok "AptaRank installed"
+ok "build tools"
 
-# -- 3. ushuffle, which never installs cleanly ---------------------------
+# -- 3. ushuffle FIRST, because it never installs cleanly ----------------
+#
+# It is a hard dependency of AptaRank, so installing the package first would
+# make pip try to build it under build isolation — where Cython is absent, the
+# shipped pre-generated C is used, and the build fails on any Python >= 3.9
+# (tp_print on 3.9-3.11, longintrepr.h on 3.12). Building it here, with
+# --no-build-isolation, lets setup.py re-cythonize the .pyx against the current
+# interpreter; the package install below then sees the requirement satisfied.
 
 if ! "$PY" -c "import ushuffle" 2>/dev/null; then
     log "Building ushuffle from source"
-    # Its published package ships pre-generated Cython C referencing tp_print,
-    # removed in CPython 3.9. setup.py re-cythonizes when Cython is importable,
-    # which build isolation prevents — hence --no-build-isolation.
     work="$(mktemp -d)"
     "$PY" -m pip download ushuffle --no-binary :all: --no-deps -d "$work" --quiet
     tar -xzf "$work"/ushuffle-*.tar.gz -C "$work"
-    "$PY" -m pip install --quiet --no-build-isolation "$work"/ushuffle-*/
+    if "$PY" -m pip install --quiet --no-build-isolation "$work"/ushuffle-*/; then
+        ok "ushuffle built"
+    else
+        warn "ushuffle build failed — the shuffled-control check will be unavailable"
+    fi
     rm -rf "$work"
-    ok "ushuffle built"
 else
     ok "ushuffle present"
 fi
+
+log "Installing AptaRank"
+"$PY" -m pip install --quiet -e "$APP_DIR[dashboard]"
+ok "AptaRank installed"
 
 # -- 4. fpocket, so Tier 2 works on real structures ----------------------
 

@@ -170,33 +170,44 @@ def missing_packages(python: Path) -> list[str]:
 def install(python: Path) -> None:
     """Install AptaRank and its dependencies, including the ushuffle workaround."""
     log("Installing AptaRank and its dependencies")
-    steps = [
-        ([str(python), "-m", "pip", "install", "--upgrade", "pip", "setuptools",
-          "wheel", "cython"], "build tools"),
-        ([str(python), "-m", "pip", "install", "-e", f"{REPO_ROOT}[dashboard]"],
-         "AptaRank and its scientific packages"),
-    ]
-    for command, description in steps:
-        print(f"  Installing {description}…")
-        result = subprocess.run(command, capture_output=True, text=True)
-        log(f"$ {' '.join(command)}\n{result.stdout[-4000:]}\n{result.stderr[-4000:]}",
-            echo=False)
-        if result.returncode != 0:
-            print(f"\n  Could not install {description}.")
-            print(f"  The details are in {LOG_PATH}")
-            raise SystemExit(1)
 
+    print("  Installing build tools…")
+    result = subprocess.run(
+        [str(python), "-m", "pip", "install", "--upgrade", "pip", "setuptools",
+         "wheel", "cython"],
+        capture_output=True, text=True,
+    )
+    log(f"build tools:\n{result.stdout[-2000:]}\n{result.stderr[-2000:]}", echo=False)
+    if result.returncode != 0:
+        print(f"\n  Could not install the build tools. Details in {LOG_PATH}")
+        raise SystemExit(1)
+
+    # ushuffle before the package that depends on it: installing AptaRank first
+    # would make pip build ushuffle under build isolation, where it always
+    # fails (see install_ushuffle).
     if "ushuffle" in missing_packages(python):
         install_ushuffle(python)
+
+    print("  Installing AptaRank and its scientific packages…")
+    result = subprocess.run(
+        [str(python), "-m", "pip", "install", "-e", f"{REPO_ROOT}[dashboard]"],
+        capture_output=True, text=True,
+    )
+    log(f"aptarank:\n{result.stdout[-4000:]}\n{result.stderr[-4000:]}", echo=False)
+    if result.returncode != 0:
+        print(f"\n  Could not install AptaRank. The details are in {LOG_PATH}")
+        raise SystemExit(1)
 
 
 def install_ushuffle(python: Path) -> None:
     """Build ushuffle from source.
 
-    Its published package ships pre-generated C that references `tp_print`,
-    removed from CPython in 3.9, so the normal install always fails. Building
-    from the `.pyx` with a current Cython works — but needs a C compiler, which
-    is the one prerequisite a biologist's machine may genuinely lack.
+    Its published package ships pre-generated Cython C that no longer compiles
+    against modern CPython — `tp_print` on 3.9–3.11, `longintrepr.h` on 3.12 —
+    so the normal install always fails. Building from the `.pyx` with a current
+    Cython works, which means `--no-build-isolation` (build isolation hides the
+    Cython we just installed). It needs a C compiler, the one prerequisite a
+    biologist's machine may genuinely lack.
     """
     print("  Building the shuffling library from source…")
     workdir = REPO_ROOT / "logs" / "ushuffle_build"
