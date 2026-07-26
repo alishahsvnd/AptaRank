@@ -94,12 +94,10 @@ if (-not $SkipRestart) {
     }
 }
 
-Write-Host @"
-
-Deployed.
-
-  To use it from this machine, double-click:   deploy\connect.bat
-  or run:                                      ssh -N -L 8501:127.0.0.1:8501 $RemoteHost
-  then open:                                   http://localhost:8501
-
-"@ -ForegroundColor Green
+Write-Host ""
+Write-Host "Deployed." -ForegroundColor Green
+Write-Host ""
+Write-Host "  To use it from this machine, double-click:   deploy\connect.bat"
+Write-Host "  or run:                                      ssh -N -L 8501:127.0.0.1:8501 $RemoteHost"
+Write-Host "  then open:                                   http://localhost:8501"
+Write-Host ""
