@@ -12,7 +12,7 @@ REM ============================================================
 setlocal
 
 set REMOTE=H200
-set PORT=8501
+set PORT=8510
 
 echo.
 echo   Connecting to the AptaRank server...

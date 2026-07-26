@@ -16,7 +16,10 @@ set -euo pipefail
 
 APP_DIR="${APTARANK_APP_DIR:-$HOME/aptarank}"
 DATA_DIR="${APTARANK_DATA_DIR:-$HOME/aptarank-data}"
-PORT="${APTARANK_PORT:-8501}"
+# 8501 and 8502 are Streamlit's defaults and were already taken on this machine
+# by someone else's app - which also meant an early health check was cheerfully
+# reporting *their* service as ours. Pick something unlikely to collide.
+PORT="${APTARANK_PORT:-8510}"
 BIND="${APTARANK_BIND:-127.0.0.1}"
 
 PID_FILE="$DATA_DIR/aptarank.pid"
@@ -52,6 +55,11 @@ start)
         exit 0
     fi
     [ -x "$PY" ] || { echo "Not installed: run deploy/server_install.sh first"; exit 1; }
+    if ss -ltn "sport = :$PORT" 2>/dev/null | grep -q LISTEN; then
+        echo "Port $PORT is already in use by something else on this machine."
+        echo "Set APTARANK_PORT to a free port and try again."
+        exit 1
+    fi
     mkdir -p "$DATA_DIR/logs"
 
     # nice: this is a background service on someone else's compute box.

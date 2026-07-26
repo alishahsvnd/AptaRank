@@ -20,6 +20,10 @@ DATA_DIR="${APTARANK_DATA_DIR:-$HOME/aptarank-data}"
 VENV_DIR="$APP_DIR/.venv"
 LOCAL_BIN="$HOME/.local/bin"
 PYTHON="${APTARANK_PYTHON:-python3}"
+PORT="${APTARANK_PORT:-8510}"
+# fpocket is installed here rather than system-wide, and a non-interactive ssh
+# shell does not have it on PATH by default.
+export PATH="$LOCAL_BIN:$PATH"
 
 log()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[33m    !! %s\033[0m\n' "$*"; }
@@ -79,7 +83,9 @@ else
 fi
 
 log "Installing AptaRank"
-"$PY" -m pip install --quiet -e "$APP_DIR[dashboard]"
+# [dev] as well as [dashboard]: the install verifies itself by running the test
+# suite, and refusing to start a service whose tests fail is the point.
+"$PY" -m pip install --quiet -e "$APP_DIR[dashboard,dev]"
 ok "AptaRank installed"
 
 # -- 4. fpocket, so Tier 2 works on real structures ----------------------
@@ -136,9 +142,18 @@ ok "configs/server.yaml"
 
 log "Checking the installation"
 "$PY" - <<'PYCODE'
-import importlib, shutil, sys
+import importlib, shutil, sys, warnings
+warnings.filterwarnings("ignore")
+
+# forgi's top-level package imports its optional 3D submodule, which is
+# compiled against NumPy 1.x and raises on NumPy 2. AptaRank never touches that
+# module - it imports forgi.graph.bulge_graph directly - so the check must test
+# what the code actually uses, not a package that would fail for a reason that
+# cannot affect us.
+names = ("aptarank", "RNA", "forgi.graph.bulge_graph", "ushuffle", "Bio",
+         "streamlit", "altair", "pytest")
 missing = []
-for name in ("aptarank", "RNA", "forgi", "ushuffle", "Bio", "streamlit", "altair"):
+for name in names:
     try:
         importlib.import_module(name)
     except Exception as exc:
@@ -148,6 +163,23 @@ if missing:
     print("    MISSING   ", ", ".join(missing))
     sys.exit(1)
 print("    imports    all present")
+PYCODE
+
+log "Checking the pipeline end to end"
+"$PY" - <<'PYCODE'
+import warnings
+warnings.filterwarnings("ignore")
+from aptarank.tier1 import folding, elements, shuffles
+
+seq = "GUUCCAUGGGCCUUGACUUGCUGUGUCAUCACCAUGGGAC"
+result = folding.fold(seq)
+assert abs(result.mfe - (-17.9)) < 1e-3, result.mfe
+assert abs(result.ensemble_defect - 0.0092) < 1e-4, result.ensemble_defect
+feats = elements.parse_elements(result.dot_bracket, seq)
+assert (feats.n_hairpins, feats.longest_stem_bp) == (1, 9)
+controls = shuffles.generate_shuffles(seq, 5, 2, seed=1)
+assert all(sorted(c) == sorted(seq) for c in controls)
+print(f"    folding    mfe {result.mfe}, defect {result.ensemble_defect:.4f} - matches the reference values")
 PYCODE
 
 if [ -d "$APP_DIR/tests" ]; then
@@ -161,4 +193,8 @@ if [ -d "$APP_DIR/tests" ]; then
 fi
 
 log "Done"
+if ss -ltn "sport = :$PORT" 2>/dev/null | grep -q LISTEN; then
+    warn "port $PORT is already in use on this machine by something else"
+    warn "set APTARANK_PORT to a free port before starting"
+fi
 echo "    Start it with:  $APP_DIR/deploy/aptarank.sh start"

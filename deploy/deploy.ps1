@@ -25,6 +25,7 @@ param(
     [string]$AppDir     = "aptarank",
     [string]$DataDir    = "aptarank-data",
     [string]$Branch     = "main",
+    [int]$Port          = 8510,
     [switch]$SkipRestart,
     [switch]$SkipInstall,
     [switch]$Force        # deploy despite uncommitted changes, without prompting
@@ -109,20 +110,31 @@ if ($deployed -ne $commit) { Warn "server commit differs from local ($commit)" }
 
 if (-not $SkipInstall) {
     Step "Installing / updating the environment (this can take a few minutes)"
-    ssh $RemoteHost "chmod +x ~/$AppDir/deploy/*.sh; APTARANK_APP_DIR=~/$AppDir APTARANK_DATA_DIR=~/$DataDir bash ~/$AppDir/deploy/server_install.sh"
+    ssh $RemoteHost "chmod +x ~/$AppDir/deploy/*.sh; APTARANK_APP_DIR=~/$AppDir APTARANK_DATA_DIR=~/$DataDir APTARANK_PORT=$Port bash ~/$AppDir/deploy/server_install.sh"
 }
 
 if (-not $SkipRestart) {
     Step "Restarting the dashboard"
-    ssh $RemoteHost "APTARANK_APP_DIR=~/$AppDir APTARANK_DATA_DIR=~/$DataDir bash ~/$AppDir/deploy/aptarank.sh restart"
+    ssh $RemoteHost "APTARANK_APP_DIR=~/$AppDir APTARANK_DATA_DIR=~/$DataDir APTARANK_PORT=$Port bash ~/$AppDir/deploy/aptarank.sh restart"
 
     Step "Health check"
-    $health = (Invoke-Remote "sleep 3; curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8501/ 2>/dev/null || echo failed" | Select-Object -Last 1)
-    $health = "$health".Trim()
-    if ($health -eq "200") {
-        Ok "dashboard responding"
+    # Check that OUR process is serving the port, not merely that something is.
+    # Another user's Streamlit was already on 8501, and an HTTP-only check
+    # happily reported their app as a successful deployment of ours.
+    $probe = @"
+pid=`$(cat ~/$DataDir/aptarank.pid 2>/dev/null || echo none)
+kill -0 "`$pid" 2>/dev/null || { echo "dead:`$pid"; exit 0; }
+owner=`$(ss -ltnp "sport = :$Port" 2>/dev/null | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2)
+code=`$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:$Port/ 2>/dev/null || echo 000)
+echo "pid=`$pid owner=`$owner code=`$code"
+"@
+    $result = (Invoke-Remote $probe | Select-Object -Last 1)
+    if ($result -match 'pid=(\d+) owner=(\d*) code=(\d+)' -and
+        $Matches[3] -eq "200" -and $Matches[1] -eq $Matches[2]) {
+        Ok "dashboard responding on port $Port (pid $($Matches[1]))"
     } else {
-        Warn "health check returned '$health'. Check: ssh $RemoteHost 'tail -40 ~/$DataDir/logs/dashboard.log'"
+        Warn "health check failed: $result"
+        Warn "Check: ssh $RemoteHost 'tail -40 ~/$DataDir/logs/dashboard.log'"
         exit 1
     }
 }
@@ -131,6 +143,6 @@ Write-Host ""
 Write-Host "Deployed." -ForegroundColor Green
 Write-Host ""
 Write-Host "  To use it from this machine, double-click:   deploy\connect.bat"
-Write-Host "  or run:                                      ssh -N -L 8501:127.0.0.1:8501 $RemoteHost"
-Write-Host "  then open:                                   http://localhost:8501"
+Write-Host "  or run:                                      ssh -N -L $Port`:127.0.0.1:$Port $RemoteHost"
+Write-Host "  then open:                                   http://localhost:$Port"
 Write-Host ""
