@@ -16,6 +16,16 @@ set -euo pipefail
 
 APP_DIR="${APTARANK_APP_DIR:-$HOME/aptarank}"
 DATA_DIR="${APTARANK_DATA_DIR:-$HOME/aptarank-data}"
+
+# Site settings live with the data, not the code: a redeploy replaces the
+# checkout, and silently putting the service back on loopback - taking it away
+# from everyone using it - is not an acceptable side effect of a code update.
+# Anything already in the environment still wins.
+ENV_FILE="$DATA_DIR/aptarank.env"
+if [ -f "$ENV_FILE" ]; then
+    # shellcheck disable=SC1090
+    set -a; . "$ENV_FILE"; set +a
+fi
 # 8501 and 8502 are Streamlit's defaults and were already taken on this machine
 # by someone else's app - which also meant an early health check was cheerfully
 # reporting *their* service as ours. Pick something unlikely to collide.
