@@ -193,8 +193,15 @@ if [ -d "$APP_DIR/tests" ]; then
 fi
 
 log "Done"
+# Only complain if something *other than our own service* holds the port: an
+# update runs this while the previous instance is still up, and warning about
+# ourselves would cry wolf on every deploy.
 if ss -ltn "sport = :$PORT" 2>/dev/null | grep -q LISTEN; then
-    warn "port $PORT is already in use on this machine by something else"
-    warn "set APTARANK_PORT to a free port before starting"
+    our_pid="$(cat "$DATA_DIR/aptarank.pid" 2>/dev/null || echo none)"
+    holder="$(ss -ltnp "sport = :$PORT" 2>/dev/null | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2)"
+    if [ "$holder" != "$our_pid" ]; then
+        warn "port $PORT is already in use on this machine by something else"
+        warn "set APTARANK_PORT to a free port before starting"
+    fi
 fi
 echo "    Start it with:  $APP_DIR/deploy/aptarank.sh start"

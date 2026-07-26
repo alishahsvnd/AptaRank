@@ -20,6 +20,14 @@ DATA_DIR="${APTARANK_DATA_DIR:-$HOME/aptarank-data}"
 # by someone else's app - which also meant an early health check was cheerfully
 # reporting *their* service as ours. Pick something unlikely to collide.
 PORT="${APTARANK_PORT:-8510}"
+
+# Loopback by default; APTARANK_BIND=0.0.0.0 puts it on the lab network.
+#
+# Bound to the network there is no login: anyone who can reach the port can
+# upload sequences and see every result on the machine. That is a reasonable
+# trade for a colleague trying the tool out on an internal network, and the
+# wrong one for unpublished data once more people are involved -- at which
+# point deploy/enable_access.sh puts an authenticating proxy in front of it.
 BIND="${APTARANK_BIND:-127.0.0.1}"
 
 PID_FILE="$DATA_DIR/aptarank.pid"
@@ -55,6 +63,8 @@ start)
         exit 0
     fi
     [ -x "$PY" ] || { echo "Not installed: run deploy/server_install.sh first"; exit 1; }
+    # Someone else's Streamlit already owns 8501/8502 on this machine, so a
+    # port collision is a real possibility rather than a theoretical one.
     if ss -ltn "sport = :$PORT" 2>/dev/null | grep -q LISTEN; then
         echo "Port $PORT is already in use by something else on this machine."
         echo "Set APTARANK_PORT to a free port and try again."
@@ -77,7 +87,11 @@ start)
     sleep 4
     if pid="$(running_pid)"; then
         echo "Started (pid $pid)"
-        echo "  listening on   http://$BIND:$PORT   (loopback only, by design)"
+        if [ "$BIND" = "127.0.0.1" ]; then
+            echo "  listening on   http://$BIND:$PORT   (loopback only; reach it via an SSH tunnel)"
+        else
+            echo "  listening on   http://$(hostname -I | awk '{print $1}'):$PORT   (open on the network, no login)"
+        fi
         echo "  job slots      $APTARANK_MAX_CONCURRENT_JOBS × $APTARANK_WORKERS_PER_JOB workers"
         echo "  data           $DATA_DIR"
         echo "  log            $LOG_FILE"
