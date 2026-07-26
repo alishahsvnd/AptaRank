@@ -13,13 +13,23 @@ and never touch the 3D code.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import warnings
 from dataclasses import dataclass, field
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=UserWarning, module="forgi")
 
-from forgi.graph.bulge_graph import BulgeGraph  # noqa: E402
+# Importing any forgi submodule executes forgi/__init__.py, which pulls in the
+# optional 3D module. That module is compiled against NumPy 1.x, so on NumPy 2
+# it prints a multi-line traceback to stderr before forgi swallows the error
+# and carries on. The import succeeds and nothing we use is affected — but the
+# noise lands in job logs, which the dashboard shows to users when a run fails,
+# where an unexplained traceback reads as a crash. Silence it here rather than
+# pinning NumPy back for a module this project never touches.
+with contextlib.redirect_stderr(io.StringIO()):
+    from forgi.graph.bulge_graph import BulgeGraph  # noqa: E402
 
 LOOP_CODES = ("h", "i", "m")
 
