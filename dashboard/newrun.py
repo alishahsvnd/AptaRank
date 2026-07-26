@@ -68,7 +68,7 @@ def render(repo_root: Path, runs_dir: Path, data_dir: Path | None = None) -> Non
         "and press Run. Everything stays on this computer."
     )
 
-    candidates_path, validation = _step_sequences(pending)
+    candidates_path, validation = _step_sequences(pending, repo_root, data_dir)
     library = _step_library(repo_root, data_dir, pending)
     target = _step_target(repo_root, data_dir, pending)
     preset, name = _step_settings()
@@ -78,7 +78,9 @@ def render(repo_root: Path, runs_dir: Path, data_dir: Path | None = None) -> Non
 # -- step 1 --------------------------------------------------------------
 
 
-def _step_sequences(pending: Path) -> tuple[Path | None, dict[str, Any] | None]:
+def _step_sequences(
+    pending: Path, repo_root: Path, data_dir: Path
+) -> tuple[Path | None, dict[str, Any] | None]:
     st.markdown("#### 1 · Your candidate sequences")
     left, right = st.columns([3, 1])
     with left:
@@ -91,15 +93,29 @@ def _step_sequences(pending: Path) -> tuple[Path | None, dict[str, Any] | None]:
     with right:
         st.write("")
         st.write("")
-        st.download_button(
-            "Example file", EXAMPLE_CSV, file_name="example_candidates.csv",
-            mime="text/csv", help="Download a small file in the expected format.",
-        )
+        # Two examples: a three-line file that shows the format, and the larger
+        # demo batch, which is the one worth actually running - a ranking of
+        # three sequences tells you nothing about whether the tool works.
+        demo = _demo_candidates(repo_root, data_dir)
+        if demo is not None:
+            st.download_button(
+                "Example file", demo.read_bytes(), file_name="demo_candidates.csv",
+                mime="text/csv",
+                help="199 mixed-quality sequences to try the tool on. Download, "
+                     "then upload it on the left.",
+            )
+        else:
+            st.download_button(
+                "Example file", EXAMPLE_CSV, file_name="example_candidates.csv",
+                mime="text/csv", help="A small file in the expected format.",
+            )
 
     if uploaded is None:
         st.info(
             "Sequences must use the letters A, C, G and U (T is accepted and read "
-            "as U) and be 20–100 letters long.",
+            "as U) and be 20–100 letters long."
+            + ("  \n\nNo sequences of your own yet? Download the example on the "
+               "right and upload it back here." if demo is not None else ""),
             icon="ℹ️",
         )
         return None, None
@@ -342,6 +358,15 @@ def _step_review(
 
 
 # -- helpers -------------------------------------------------------------
+
+
+def _demo_candidates(repo_root: Path, data_dir: Path) -> Path | None:
+    """The demo batch, if this installation has one."""
+    for candidate in (data_dir / "demo_candidates.csv",
+                      repo_root / "data" / "demo_candidates.csv"):
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def _stage(pending: Path, uploaded, stem: str) -> Path:
