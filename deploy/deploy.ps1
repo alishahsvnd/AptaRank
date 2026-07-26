@@ -8,8 +8,12 @@
     dashboard.
 
     Deploys from git rather than copying files, so the server always runs an
-    identifiable commit — the same one the paper cites — and an unfinished
-    edit on this machine can never reach it.
+    identifiable commit (the same one the paper cites), and an unfinished edit
+    on this machine can never reach it.
+
+    Kept to plain ASCII on purpose: Windows PowerShell 5.1 reads a BOM-less
+    UTF-8 script as ANSI, and a single stray character mangles the parse with
+    an error that points at the wrong line.
 
 .EXAMPLE
     .\deploy\deploy.ps1
@@ -22,7 +26,8 @@ param(
     [string]$DataDir    = "aptarank-data",
     [string]$Branch     = "main",
     [switch]$SkipRestart,
-    [switch]$SkipInstall
+    [switch]$SkipInstall,
+    [switch]$Force        # deploy despite uncommitted changes, without prompting
 )
 
 $ErrorActionPreference = "Stop"
@@ -38,7 +43,15 @@ $dirty = git status --porcelain
 if ($dirty) {
     Warn "Uncommitted changes will NOT be deployed:"
     $dirty -split "`n" | Select-Object -First 10 | ForEach-Object { Write-Host "        $_" }
-    if ((Read-Host "    Continue anyway? [y/N]") -notmatch '^[Yy]') { exit 1 }
+    if ($Force) {
+        Warn "-Force given: deploying the last commit regardless"
+    } elseif ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected) {
+        if ((Read-Host "    Continue anyway? [y/N]") -notmatch '^[Yy]') { exit 1 }
+    } else {
+        Warn "Refusing to deploy with a dirty tree in a non-interactive shell."
+        Warn "Commit the changes, or re-run with -Force."
+        exit 1
+    }
 }
 $commit = (git rev-parse --short HEAD).Trim()
 Ok "deploying $Branch @ $commit"
@@ -89,7 +102,7 @@ if (-not $SkipRestart) {
     if ($health -match "200") {
         Ok "dashboard responding"
     } else {
-        Warn "health check returned '$health' — check: ssh $RemoteHost 'tail -40 ~/$DataDir/logs/dashboard.log'"
+        Warn "health check returned '$health'. Check: ssh $RemoteHost 'tail -40 ~/$DataDir/logs/dashboard.log'"
         exit 1
     }
 }
