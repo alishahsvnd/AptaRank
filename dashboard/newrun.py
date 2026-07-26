@@ -52,8 +52,13 @@ STATE_BADGES = {
 }
 
 
-def render(repo_root: Path, runs_dir: Path) -> None:
-    """Draw the whole flow and, if the user confirms, launch a job."""
+def render(repo_root: Path, runs_dir: Path, data_dir: Path | None = None) -> None:
+    """Draw the whole flow and, if the user confirms, launch a job.
+
+    `data_dir` is where a deployment keeps its libraries and prepared targets —
+    outside the code checkout, which a redeploy replaces.
+    """
+    data_dir = data_dir or repo_root
     pending = runs_dir / "pending"
     pending.mkdir(parents=True, exist_ok=True)
 
@@ -64,8 +69,8 @@ def render(repo_root: Path, runs_dir: Path) -> None:
     )
 
     candidates_path, validation = _step_sequences(pending)
-    library = _step_library(repo_root, pending)
-    target = _step_target(repo_root, pending)
+    library = _step_library(repo_root, data_dir, pending)
+    target = _step_target(repo_root, data_dir, pending)
     preset, name = _step_settings()
     _step_review(runs_dir, candidates_path, validation, library, target, preset, name)
 
@@ -128,7 +133,7 @@ def _step_sequences(pending: Path) -> tuple[Path | None, dict[str, Any] | None]:
 # -- step 2 --------------------------------------------------------------
 
 
-def _step_library(repo_root: Path, pending: Path) -> ReferenceLibrary | None:
+def _step_library(repo_root: Path, data_dir: Path, pending: Path) -> ReferenceLibrary | None:
     st.markdown("#### 2 · Reference library")
     st.caption(
         "AptaRank compares each of your sequences with experimentally validated "
@@ -138,7 +143,8 @@ def _step_library(repo_root: Path, pending: Path) -> ReferenceLibrary | None:
 
     libraries = [
         lib for lib in discover_libraries(
-            repo_root / "data" / "corpus", repo_root / "data" / "libraries"
+            data_dir / "data" / "corpus", data_dir / "data" / "libraries",
+            repo_root / "data" / "corpus", repo_root / "data" / "libraries",
         )
         if lib.usable
     ]
@@ -196,7 +202,7 @@ def _library_label(library: ReferenceLibrary) -> str:
 # -- step 3 --------------------------------------------------------------
 
 
-def _step_target(repo_root: Path, pending: Path) -> TargetEvidence | None:
+def _step_target(repo_root: Path, data_dir: Path, pending: Path) -> TargetEvidence | None:
     st.markdown("#### 3 · Protein target *(optional)*")
     st.caption(
         "A prepared target file holds cavity measurements taken from a protein "
@@ -204,7 +210,9 @@ def _step_target(repo_root: Path, pending: Path) -> TargetEvidence | None:
         "size agrees with that cavity. It does not predict binding."
     )
 
-    targets = discover_targets(repo_root / "cache" / "targets", repo_root / "targets")
+    targets = discover_targets(
+        data_dir / "cache" / "targets", repo_root / "cache" / "targets"
+    )
     options = ["none", *targets, "upload"]
 
     def label(option: Any) -> str:
@@ -304,21 +312,23 @@ def _step_review(
     for message in verdict["warnings"]:
         st.warning(message, icon="⚠️")
 
-    busy = jobs.active(runs_dir)
-    if busy:
+    load = jobs.slots(runs_dir)
+    if load["running"] >= load["capacity"]:
         st.info(
-            f"An analysis is already running ({busy.label}). Only one runs at a "
-            f"time so it can use the whole machine.",
+            f"{load['running']} analysis(es) already running"
+            + (f", {load['queued']} waiting" if load["queued"] else "")
+            + ". Yours will start automatically as soon as a slot frees — this "
+              "machine is shared, so AptaRank only takes a fixed share of it.",
             icon="⏳",
         )
 
     if st.button(
         "Run analysis",
         type="primary",
-        disabled=not verdict["can_run"] or busy is not None,
+        disabled=not verdict["can_run"],
         use_container_width=True,
     ):
-        job = jobs.launch(
+        job = jobs.submit(
             runs_dir,
             candidates_path=candidates_path,
             corpus_path=library.path,

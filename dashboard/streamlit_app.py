@@ -15,12 +15,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 import streamlit as st
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+#: On a server the mutable state lives outside the checkout, which every deploy
+#: replaces. Locally the two are the same directory.
+DATA_DIR = Path(os.environ.get("APTARANK_DATA_DIR", REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT))
 
 from dashboard import jobs, newrun, progress_view, views  # noqa: E402
@@ -77,6 +81,10 @@ def main() -> None:
     if args.artifact and "artifact_path" not in st.session_state:
         st.session_state["artifact_path"] = args.artifact
 
+    # Start any run that has been waiting for a slot. Cheap, and it means the
+    # queue advances whenever anyone has the page open.
+    jobs.pump(runs_dir)
+
     with st.sidebar:
         st.markdown("## 🧬 AptaRank")
         st.caption("Interpretable ranking of generated RNA aptamers")
@@ -85,7 +93,12 @@ def main() -> None:
         view = st.radio("Go to", VIEWS, index=default, label_visibility="collapsed")
         st.session_state["view"] = view
         if running:
-            st.info(f"Running: {running.label}", icon="⏳")
+            load = jobs.slots(runs_dir)
+            st.info(
+                f"{running.label}\n\n{load['running']}/{load['capacity']} slots busy"
+                + (f", {load['queued']} waiting" if load["queued"] else ""),
+                icon="⏳",
+            )
         st.divider()
         st.caption(
             "Tier 1 ranks candidates on intrinsic structure. Tier 2 annotates "
@@ -94,7 +107,7 @@ def main() -> None:
         )
 
     if view == "New analysis":
-        newrun.render(REPO_ROOT, runs_dir)
+        newrun.render(REPO_ROOT, runs_dir, data_dir=DATA_DIR)
         watching = st.session_state.get("watch_job")
         if watching:
             st.session_state["view"] = "Progress"

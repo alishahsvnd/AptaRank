@@ -40,6 +40,21 @@ JOBS_DIRNAME = "jobs"
 #: generously: the corpus and calibration stages are silent for a while.
 HEARTBEAT_TIMEOUT_S = 900
 
+#: Resource policy. On a shared machine these are the difference between a
+#: useful service and an antisocial one: AptaRank must never take the whole box
+#: away from whoever else is using it. Server deployments raise the job limit
+#: and cap the workers each job may claim; the defaults suit one laptop.
+MAX_CONCURRENT_JOBS = int(os.environ.get("APTARANK_MAX_CONCURRENT_JOBS", "1"))
+WORKERS_PER_JOB = os.environ.get("APTARANK_WORKERS_PER_JOB")   # None -> config default
+
+#: A deployment-specific config layered over configs/default.yaml — where the
+#: server keeps its caches and results, outside the replaceable code checkout.
+SITE_CONFIG = os.environ.get("APTARANK_CONFIG")
+
+QUEUED, RUNNING, COMPLETED, FAILED, STALLED = (
+    "queued", "running", "completed", "failed", "stalled"
+)
+
 
 @dataclass
 class Job:
@@ -65,6 +80,10 @@ class Job:
     def label(self) -> str:
         return self.request.get("name") or self.job_id
 
+    @property
+    def is_queued(self) -> bool:
+        return self.request.get("pid") is None and not self.progress_file.exists()
+
     def state(self) -> dict[str, Any]:
         """Current status, derived from the event stream plus liveness checks."""
         events = read_events(self.progress_file)
@@ -73,6 +92,11 @@ class Job:
         state["label"] = self.label
         state["created_utc"] = self.created_utc
         state["n_events"] = len(events)
+
+        if self.is_queued:
+            state["status"] = QUEUED
+            state["stage_label"] = "Waiting for a free slot"
+            return state
 
         if state["status"] == "completed":
             # Exit zero with no artifact is a failure, not a success.
@@ -192,7 +216,7 @@ def stage_upload(directory: Path, uploaded, fallback_name: str) -> Path:
     return target
 
 
-def launch(
+def submit(
     runs_dir: str | Path,
     candidates_path: str | Path,
     corpus_path: str | Path,
@@ -205,7 +229,7 @@ def launch(
     job_id: str | None = None,
     python_executable: str | None = None,
 ) -> Job:
-    """Start `aptarank run` in the background and return its Job handle."""
+    """Queue a run. It starts immediately if a slot is free, else it waits."""
     job_id = job_id or new_job_id()
     directory = jobs_root(runs_dir) / job_id
     (directory / "inputs").mkdir(parents=True, exist_ok=True)
@@ -218,14 +242,65 @@ def launch(
         "--progress-file", str(directory / "progress.jsonl"),
         "--job-id", job_id,
     ]
+    if SITE_CONFIG and Path(SITE_CONFIG).is_file():
+        command += ["-c", SITE_CONFIG]
     if corpus_is_placeholder:
         command += ["--development-corpus", str(corpus_path)]
     else:
         command += ["--corpus", str(corpus_path)]
     if bundle_path:
         command += ["--target-bundle", str(bundle_path)]
-    for item in preset_settings(preset) + list(extra_sets):
+
+    settings = preset_settings(preset) + list(extra_sets)
+    if WORKERS_PER_JOB:
+        # Server policy overrides anything a preset or a config file asks for.
+        settings = [s for s in settings if not s.startswith("tier1.parallel.workers")]
+        settings.append(f"tier1.parallel.workers={int(WORKERS_PER_JOB)}")
+    for item in settings:
         command += ["--set", item]
+
+    request = {
+        "job_id": job_id,
+        "name": name,
+        "created_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "pid": None,
+        "command": command,
+        "runs_dir": str(runs_dir),
+        "preset": preset,
+        "candidates": str(candidates_path),
+        "corpus": str(corpus_path),
+        "corpus_is_placeholder": corpus_is_placeholder,
+        "target_bundle": str(bundle_path) if bundle_path else None,
+    }
+    (directory / "request.json").write_text(json.dumps(request, indent=2), encoding="utf-8")
+
+    job = Job(job_id=job_id, directory=directory, request=request)
+    pump(runs_dir)
+    return Job(job_id=job_id, directory=directory,
+               request=json.loads((directory / "request.json").read_text(encoding="utf-8")))
+
+
+def pump(runs_dir: str | Path) -> list[Job]:
+    """Start queued jobs while slots are free. Cheap; call it on every render."""
+    started: list[Job] = []
+    found = discover(runs_dir, limit=100)
+    running = sum(1 for job in found if job.state()["status"] in (RUNNING, "pending"))
+    waiting = [job for job in reversed(found) if job.is_queued]   # oldest first
+
+    for job in waiting:
+        if running >= MAX_CONCURRENT_JOBS:
+            break
+        _spawn(job)
+        running += 1
+        started.append(job)
+    return started
+
+
+def _spawn(job: Job) -> None:
+    """Launch the CLI for an already-queued job and record its PID."""
+    directory = job.directory
+    command = job.request["command"]
+    runs_dir = Path(job.request.get("runs_dir", directory.parent.parent))
 
     stdout = (directory / "stdout.log").open("w", encoding="utf-8")
     stderr = (directory / "stderr.log").open("w", encoding="utf-8")
@@ -241,20 +316,11 @@ def launch(
 
     process = subprocess.Popen(command, **popen_kwargs)
 
-    request = {
-        "job_id": job_id,
-        "name": name,
-        "created_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "pid": process.pid,
-        "command": command,
-        "preset": preset,
-        "candidates": str(candidates_path),
-        "corpus": str(corpus_path),
-        "corpus_is_placeholder": corpus_is_placeholder,
-        "target_bundle": str(bundle_path) if bundle_path else None,
-    }
-    (directory / "request.json").write_text(json.dumps(request, indent=2), encoding="utf-8")
-    return Job(job_id=job_id, directory=directory, request=request)
+    job.request["pid"] = process.pid
+    job.request["started_utc"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    (directory / "request.json").write_text(
+        json.dumps(job.request, indent=2), encoding="utf-8"
+    )
 
 
 def preset_settings(preset: str) -> list[str]:
@@ -304,15 +370,21 @@ def discover(runs_dir: str | Path, limit: int = 50) -> list[Job]:
 
 
 def active(runs_dir: str | Path) -> Job | None:
-    """The one running job, if any.
-
-    Only one at a time: two 15-worker runs would oversubscribe the machine and
-    make every runtime estimate meaningless.
-    """
-    for job in discover(runs_dir, limit=10):
-        if job.state()["status"] in ("pending", "running"):
+    """The first job that is running or waiting for a slot, if any."""
+    for job in discover(runs_dir, limit=20):
+        if job.state()["status"] in ("pending", RUNNING, QUEUED):
             return job
     return None
+
+
+def slots(runs_dir: str | Path) -> dict[str, int]:
+    """How busy the machine is, in this tool's terms."""
+    states = [job.state()["status"] for job in discover(runs_dir, limit=100)]
+    return {
+        "running": sum(1 for s in states if s in (RUNNING, "pending")),
+        "queued": sum(1 for s in states if s == QUEUED),
+        "capacity": MAX_CONCURRENT_JOBS,
+    }
 
 
 def estimate_runtime_s(n_candidates: int, preset: str, with_target: bool) -> tuple[int, int]:
