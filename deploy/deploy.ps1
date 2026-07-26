@@ -38,6 +38,19 @@ function Step($message) { Write-Host "`n==> $message" -ForegroundColor Cyan }
 function Ok($message)   { Write-Host "    ok  $message" -ForegroundColor Green }
 function Warn($message) { Write-Host "    !!  $message" -ForegroundColor Yellow }
 
+function Invoke-Remote {
+    <#
+      Run a script on the server.
+
+      PowerShell here-strings carry CRLF line endings; bash receives the
+      trailing CR as part of each command and fails in ways that look like the
+      script is fine ("set -e" reported as an invalid option, directories
+      created with an invisible CR in the name). Normalise before sending.
+    #>
+    param([string]$Script)
+    ssh $RemoteHost ($Script -replace "`r`n", "`n")
+}
+
 Step "Checking the working tree"
 $dirty = git status --porcelain
 if ($dirty) {
@@ -65,7 +78,7 @@ if [ ! -d ~/$AppDir.git ]; then
     echo '    created bare repository'
 fi
 "@
-ssh $RemoteHost $prepare
+Invoke-Remote $prepare
 Ok "remote repository ready"
 
 Step "Pushing code"
@@ -84,7 +97,7 @@ git fetch -q origin $Branch
 git checkout -q -B $Branch origin/$Branch
 git rev-parse --short HEAD
 "@
-$deployed = (ssh $RemoteHost $checkout | Select-Object -Last 1).Trim()
+$deployed = (Invoke-Remote $checkout | Select-Object -Last 1).Trim()
 Ok "server now at $deployed"
 if ($deployed -ne $commit) { Warn "server commit differs from local ($commit)" }
 
