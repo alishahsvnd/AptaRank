@@ -85,6 +85,11 @@ Step "Pushing code"
 $remoteUrl = "${RemoteHost}:$AppDir.git"
 git push --force $remoteUrl "${Branch}:${Branch}" 2>&1 | ForEach-Object { Write-Host "    $_" }
 
+# reset --hard, not checkout: the working tree is disposable code, and the
+# server has no business carrying local edits. core.fileMode=false stops the
+# executable bit (set when the install script runs chmod) from registering as a
+# modification and blocking the next deploy. Untracked paths - .venv and the
+# generated configs/server.yaml - are deliberately left alone.
 $checkout = @"
 set -e
 cd ~/$AppDir
@@ -92,9 +97,10 @@ if [ ! -d .git ]; then
     git init -q .
     git remote add origin ~/$AppDir.git 2>/dev/null || true
 fi
+git config core.fileMode false
 git remote set-url origin ~/$AppDir.git
 git fetch -q origin $Branch
-git checkout -q -B $Branch origin/$Branch
+git reset -q --hard origin/$Branch
 git rev-parse --short HEAD
 "@
 $deployed = (Invoke-Remote $checkout | Select-Object -Last 1).Trim()
