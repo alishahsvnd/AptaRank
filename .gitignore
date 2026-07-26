@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Run outputs and caches — regenerable, never committed
+runs/
+cache/
+data/corpus/
+data/*.local.*
+!data/demo_candidates.csv
+!data/README.md

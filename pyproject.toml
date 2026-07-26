@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aptarank"
+version = "0.1.0"
+description = "Two-tier evaluation and ranking framework for foundation-model-generated RNA aptamers"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "ViennaRNA>=2.7.2",
+    "forgi>=2.2.3",
+    "ushuffle>=1.1.2",
+    "biopython>=1.81",
+    "numpy>=1.23",
+    "scipy>=1.9",
+    "pandas>=2.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dashboard = ["streamlit>=1.36", "altair>=5.0"]
+dev = ["pytest>=7.4", "jsonschema>=4.0"]
+
+[project.scripts]
+aptarank = "aptarank.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]

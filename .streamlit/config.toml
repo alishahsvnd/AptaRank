@@ -1,0 +1,19 @@
+# Dashboard theme.
+#
+# primaryColor matches the chart series colour so Streamlit's own widgets
+# (progress columns, focus rings, links) belong to the same palette as the
+# Altair charts instead of introducing a second accent.
+
+[theme]
+base = "light"
+primaryColor = "#2a78d6"
+backgroundColor = "#fcfcfb"
+secondaryBackgroundColor = "#f2f1ed"
+textColor = "#0b0b0b"
+font = "sans serif"
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false

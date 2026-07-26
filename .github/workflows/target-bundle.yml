@@ -1,0 +1,96 @@
+# Generates a target bundle on pinned Linux.
+#
+# fpocket and APBS have no Windows build, so all target-derived evidence is
+# produced here, once, and committed as an immutable checksummed bundle. Every
+# platform then scores against the same evidence with no external tools.
+#
+# This workflow IS the reproducibility story the paper cites: anyone can re-run
+# it and check that the bundle id matches.
+
+name: target-bundle
+
+on:
+  workflow_dispatch:
+    inputs:
+      pdb_id:
+        description: "4-character PDB ID (e.g. 3SPU)"
+        required: true
+        type: string
+      chain:
+        description: "Chain identifier (blank = first protein chain)"
+        required: false
+        type: string
+      active_site_residues:
+        description: "JSON list of literature-confirmed residue numbers, e.g. [120,122,189]"
+        required: false
+        default: "[]"
+        type: string
+      retain_hetero:
+        description: "JSON list of HETATM residue names to keep, e.g. [\"ZN\"]"
+        required: false
+        default: "[]"
+        type: string
+
+jobs:
+  build:
+    # Pinned, not -latest: the bundle must be reproducible, and the apt version
+    # of fpocket is part of what produced these numbers.
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install fpocket
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fpocket
+          fpocket --version || true
+          dpkg -s fpocket | grep -E '^(Package|Version)'
+
+      - name: Install AptaRank
+        run: |
+          python -m pip install --upgrade pip cython setuptools wheel
+          python -m pip install -e ".[dev]"
+
+      - name: Build target bundle
+        run: |
+          python -m aptarank target build \
+            --pdb-id "${{ inputs.pdb_id }}" \
+            ${{ inputs.chain && format('--chain {0}', inputs.chain) || '' }} \
+            --set 'tier2.target.active_site_residues=${{ inputs.active_site_residues }}' \
+            --set 'tier2.target.retain_hetero_resnames=${{ inputs.retain_hetero }}' \
+            --output-dir bundles
+
+      - name: Verify the bundle
+        # Recomputes every stored geometric quantity from the inline alpha
+        # spheres, re-checks the bundle id, and rebuilds to confirm the
+        # scientific payload is byte-stable across runs.
+        run: python scripts/verify_target_bundle.py bundles/*.bundle.json --rebuild
+
+      # Archive one complete real fpocket output as a durable parser fixture.
+      # The workflow proves the bundle can be regenerated; an expiring Actions
+      # artifact does not give the parser durable auditability, so commit the
+      # archive produced here under tests/fixtures/fpocket/real/ once per
+      # fpocket version bump.
+      - name: Package raw fpocket output as a parser fixture
+        if: always()
+        run: |
+          mkdir -p fixture
+          cp -r cache/targets/work/*_out fixture/ 2>/dev/null || true
+          cp cache/targets/work/*_clean.pdb fixture/ 2>/dev/null || true
+          dpkg -s fpocket | grep -E '^(Package|Version)' > fixture/FPOCKET_VERSION.txt || true
+          tar -czf fpocket-fixture-${{ inputs.pdb_id }}.tar.gz fixture/
+
+      - name: Upload bundle and raw fpocket output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: target-bundle-${{ inputs.pdb_id }}
+          path: |
+            bundles/
+            fpocket-fixture-${{ inputs.pdb_id }}.tar.gz
+          retention-days: 90

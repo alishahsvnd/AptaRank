@@ -1,0 +1,5 @@
+HEADER demo pocket 2
+ATOM      1  N   LEU A  45      19.500  10.100   0.200  1.00 20.00           N
+ATOM      2  CA  LEU A  45      19.900  10.500   0.600  1.00 20.00           C
+ATOM      3  N   VAL A  46      21.500  11.100   0.200  1.00 20.00           N
+TER

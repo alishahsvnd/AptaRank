@@ -1,0 +1,13 @@
+# Normalise to LF in the repository. The project is developed on Windows and
+# deployed to Linux; a shell script checked out with CRLF fails on the server
+# with a message ("bad interpreter") that gives no hint of the real cause.
+* text=auto eol=lf
+
+*.bat  text eol=crlf
+*.ps1  text eol=crlf
+*.sh   text eol=lf
+
+*.png  binary
+*.jpg  binary
+*.JPG  binary
+*.pdf  binary

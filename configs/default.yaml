@@ -1,0 +1,111 @@
+# AptaRank default configuration.
+#
+# Every tunable in the pipeline lives here. Nothing in this file may be
+# hard-coded in the source (spec §9). The fully resolved config is copied
+# verbatim into every run artifact, so a run is always reproducible from
+# the artifact alone.
+
+run:
+  # standard | fast   (fast skips shuffled controls and ensemble sampling)
+  mode: standard
+  seed: 42
+
+input:
+  min_length: 20
+  max_length: 100
+
+corpus:
+  # Path to the validated-aptamer reference corpus CSV
+  # (columns: id, sequence, target_name, target_pdb_id, source_reference).
+  # Tier 1 percentile scoring is blocked without it (spec §3.5.1).
+  path: null
+  # Declares that corpus.path is synthetic development data rather than real
+  # validated aptamers. Set automatically by `--development-corpus`.
+  is_placeholder: false
+  # Refuse to score against a synthetic/placeholder corpus unless explicitly
+  # enabled. Placeholder runs are stamped publication_eligible: false.
+  allow_placeholder: false
+  cache_dir: cache/corpus
+
+tier1:
+  n_ensemble_samples: 100
+
+  # Weights over the five scoring criteria. Equal by default and NEVER fitted
+  # to the evaluation groups (spec §8.4).
+  weights:
+    mfe_norm: 1.0
+    ensemble_defect: 1.0
+    positional_entropy_mean: 1.0
+    stem_fraction: 1.0
+    gc_fraction: 1.0
+
+  composite:
+    # corpus_weighted_mean : tier1_score is an absolute, corpus-calibrated
+    #                        score, comparable across runs and batches.
+    #                        Required for evaluation E1 to be meaningful.
+    # batch_rank_aggregation : literal reading of the spec §4.9 snippet;
+    #                        scores depend on what else was submitted.
+    method: corpus_weighted_mean
+
+  shuffle:
+    enabled: true
+    n_shuffles: 20              # 99 for publication runs
+    k: 2                        # dinucleotide-preserving
+    alpha: 0.05                 # Monte-Carlo p-value threshold for shuffle_pass
+    # Criteria used for the structural sub-score compared against shuffles.
+    # gc_fraction and length are excluded: dinucleotide shuffling preserves
+    # them exactly, so they contribute a constant to every shuffle.
+    structural_criteria:
+      - mfe_norm
+      - ensemble_defect
+      - positional_entropy_mean
+      - stem_fraction
+
+  parallel:
+    workers: null               # null -> cpu_count() - 1
+    chunk_size: 16
+
+tier2:
+  enabled: false                # flipped on once a target bundle is available
+  n_candidates: 1000
+  a_per_nt: 6.0
+  flex_c: 1.0
+  sigma_A: 6.0
+  # flexible : sqrt-scaling end-to-end proxy (primary; contour length badly
+  #            over-penalises long loops)
+  # extended : contour length, reported as an upper-bound sensitivity check
+  primary_descriptor: flexible
+  band_percentiles:
+    moderate: 0.75
+    strong: 0.95
+
+  # Bands are defined against a FIXED bank of corpus-derived shuffled controls,
+  # not against the shuffles of whatever batch was submitted (see
+  # tier2/calibration.py). Target-independent, so it is folded once and reused.
+  calibration:
+    bank_size: 5000             # 2000 is adequate for development runs
+    cache_dir: cache/calibration
+
+  target:
+    pdb_id: null
+    chain: null                 # null -> first protein chain
+    active_site_residues: []    # literature-confirmed residue numbers
+    model: 0
+    hetero_default: retain      # retain | remove
+    retain_hetero_resnames: []  # e.g. [ZN] — kept because they shape the cavity
+    remove_hetero_resnames: [HOH, DOD, WAT]
+    # Zero overlap between the residue list and every pocket fails the build by
+    # default: it almost always means a numbering or chain mismatch.
+    allow_zero_overlap_fallback: false
+
+  electrostatics:
+    enabled: false              # stretch goal; target-level only, never in the score
+
+  bundle_dir: cache/targets
+  bundle_path: null             # explicit bundle file; overrides bundle_dir lookup
+  structure_cache_dir: cache/structures
+
+output:
+  dir: runs
+  n_diagrams: 50
+  embed_svg: true               # inline SVG text in the artifact (self-contained)
