@@ -164,23 +164,32 @@ def _step_library(repo_root: Path, data_dir: Path, pending: Path) -> ReferenceLi
         )
         if lib.usable
     ]
-    options = [*libraries, "upload"]
-    labels = {id(lib): _library_label(lib) for lib in libraries}
+
+    # Radio options are plain strings, not the dataclass instances themselves.
+    # Streamlit stores the selected *value* in session state and matches it back
+    # against the options on the next rerun; the instances are rebuilt from disk
+    # every rerun, so matching them is fragile and the click appears to do
+    # nothing. Strings match reliably, and the path keeps two libraries with the
+    # same name distinguishable.
+    by_key: dict[str, ReferenceLibrary] = {}
+    for lib in libraries:
+        by_key[f"{_library_label(lib)}  ·  {lib.path.parent}"] = lib
+    upload_key = "Upload my own library (.csv)"
+    options = [*by_key, upload_key]
 
     # Never preselect synthetic data: choosing it has to be a decision.
-    real = next((i for i, lib in enumerate(libraries) if not lib.is_placeholder), None)
+    real = next((i for i, key in enumerate(by_key) if not by_key[key].is_placeholder), None)
     default_index = real if real is not None else len(options) - 1
 
     choice = st.radio(
         "Which library should your sequences be compared with?",
         options,
-        format_func=lambda o: "Upload my own library (.csv)" if o == "upload" else labels[id(o)],
         index=default_index,
         label_visibility="collapsed",
         key="library_choice",
     )
 
-    if choice == "upload":
+    if choice == upload_key:
         uploaded = st.file_uploader(
             "Reference library (.csv with id, sequence, target_name, target_pdb_id)",
             type=["csv"], key="library_upload",
@@ -189,7 +198,7 @@ def _step_library(repo_root: Path, data_dir: Path, pending: Path) -> ReferenceLi
             return None
         library = inspect_library(_stage(pending, uploaded, "reference_library"))
     else:
-        library = choice
+        library = by_key[choice]
 
     if library.problem:
         st.error(library.problem, icon="🚫")
@@ -229,25 +238,24 @@ def _step_target(repo_root: Path, data_dir: Path, pending: Path) -> TargetEviden
     targets = discover_targets(
         data_dir / "cache" / "targets", repo_root / "cache" / "targets"
     )
-    options = ["none", *targets, "upload"]
 
-    def label(option: Any) -> str:
-        if option == "none":
-            return "No target — rank on intrinsic structure only"
-        if option == "upload":
-            return "Upload a prepared target file (.json)"
-        icon = "🚫" if option.synthetic else ("✅" if option.usable else "⚠️")
-        name = f"{option.pdb_id} chain {option.chain}"
-        return f"{icon}  {name} — {option.describe()}"
+    # Strings as options, for the same reason as the library picker above.
+    none_key = "No target — rank on intrinsic structure only"
+    upload_key = "Upload a prepared target file (.json)"
+    by_key: dict[str, TargetEvidence] = {}
+    for target in targets:
+        icon = "🚫" if target.synthetic else ("✅" if target.usable else "⚠️")
+        by_key[f"{icon}  {target.pdb_id} chain {target.chain} — {target.describe()}"] = target
+    options = [none_key, *by_key, upload_key]
 
     choice = st.radio(
-        "Compare against a target?", options, format_func=label,
+        "Compare against a target?", options,
         label_visibility="collapsed", key="target_choice",
     )
 
-    if choice == "none":
+    if choice == none_key:
         return None
-    if choice == "upload":
+    if choice == upload_key:
         uploaded = st.file_uploader(
             "Prepared target file", type=["json"], key="target_upload",
             help="Produced by `aptarank target build` on Linux, or by this "
@@ -257,7 +265,7 @@ def _step_target(repo_root: Path, data_dir: Path, pending: Path) -> TargetEviden
             return None
         target = inspect_target(_stage(pending, uploaded, "target_evidence"))
     else:
-        target = choice
+        target = by_key[choice]
 
     if target.problem:
         st.error(target.problem, icon="🚫")

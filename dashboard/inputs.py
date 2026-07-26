@@ -11,6 +11,7 @@ Warnings are reserved for choices that are legitimate but consequential.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -89,19 +90,36 @@ class TargetEvidence:
         return " · ".join(parts)
 
 
+def _content_key(path: Path) -> str:
+    """Identify a file by what is in it, not where it is.
+
+    The same corpus commonly exists in both the code checkout and the data
+    directory; listing it twice under one name gives the user two identical
+    options and no way to tell them apart.
+    """
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while block := handle.read(1 << 20):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def discover_libraries(*directories: str | Path) -> list[ReferenceLibrary]:
-    """Every reference library on disk, real ones first."""
+    """Every distinct reference library on disk, real ones first."""
     found: list[ReferenceLibrary] = []
-    seen: set[Path] = set()
+    seen: set[str] = set()
     for directory in directories:
         base = Path(directory)
         if not base.is_dir():
             continue
         for path in sorted(base.glob("*.csv")):
-            resolved = path.resolve()
-            if resolved in seen:
+            try:
+                key = _content_key(path)
+            except OSError:
                 continue
-            seen.add(resolved)
+            if key in seen:
+                continue          # same file, found in a second location
+            seen.add(key)
             found.append(inspect_library(path))
     # Development data last, and never first in a picker.
     return sorted(found, key=lambda lib: (lib.state == DEVELOPMENT, lib.name))
@@ -164,18 +182,21 @@ def inspect_library(path: str | Path) -> ReferenceLibrary:
 
 
 def discover_targets(*directories: str | Path) -> list[TargetEvidence]:
-    """Every prepared target bundle on disk, real ones first."""
+    """Every distinct prepared target bundle on disk, real ones first."""
     found: list[TargetEvidence] = []
-    seen: set[Path] = set()
+    seen: set[str] = set()
     for directory in directories:
         base = Path(directory)
         if not base.is_dir():
             continue
         for path in sorted(base.glob("*.bundle.json")):
-            resolved = path.resolve()
-            if resolved in seen:
+            try:
+                key = _content_key(path)
+            except OSError:
                 continue
-            seen.add(resolved)
+            if key in seen:
+                continue
+            seen.add(key)
             found.append(inspect_target(path))
     return sorted(found, key=lambda t: (t.synthetic, t.pdb_id))
 
