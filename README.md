@@ -264,11 +264,18 @@ Every one of these turns a class of silent wrong answer into a loud one:
   purpose)`, so results do not depend on process-pool scheduling and a reused
   input id cannot collide two sequences onto one random stream.
 
-### 6. Missing corpus is a hard failure
+### 6. Missing corpus is a hard failure, and provenance is required to publish
 
 There is no automatic fallback. `--development-corpus` is the only way to run
 without real reference data, and it marks the artifact ineligible for
 publication and prints a warning on every run.
+
+A run is `publication_eligible` only if its reference library has a
+`<name>.manifest.json` recording `source`, `curator` and `curated_date`.
+Correct columns are not provenance: the software cannot tell a curated corpus
+from somebody's scratch file, and a pipeline that calls both publishable is
+lying about the one thing this project is trying to be careful about. The
+artifact's `development_reasons` names whichever condition failed.
 
 ### 8. `d_pocket` is a robust extent, not twice the RMS spread (§5.4)
 

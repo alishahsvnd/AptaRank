@@ -182,6 +182,9 @@ def _results_view(runs_dir: Path) -> None:
         pretty = {
             "placeholder_corpus": "the reference library is synthetic example data",
             "synthetic_target_bundle": "the target cavity was fabricated for testing",
+            "unverified_corpus_provenance":
+                "the reference library has no provenance record, so where it came "
+                "from cannot be cited",
         }
         st.markdown(
             "<div class='apt-dev-banner'><b>Development run — not a result.</b> "

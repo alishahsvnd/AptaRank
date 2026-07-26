@@ -35,6 +35,23 @@ FEATURE_SCHEMA_VERSION = "1"
 REQUIRED_COLUMNS = ("sequence",)
 OPTIONAL_COLUMNS = ("id", "target_name", "target_pdb_id", "source_reference")
 
+#: A `<corpus>.manifest.json` carrying these fields is what makes a reference
+#: library citable. Without it the corpus still works, but every run against it
+#: is marked development-only — the alternative is a pipeline that cannot tell
+#: curated data from a scratch file and calls both publishable.
+MANIFEST_FIELDS = ("source", "curator", "curated_date")
+
+
+def read_manifest(corpus_path: str | Path) -> dict[str, Any]:
+    path = Path(corpus_path).with_suffix(".manifest.json")
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
 
 @dataclass
 class CorpusInfo:
@@ -50,10 +67,21 @@ class CorpusInfo:
     tool_signature: str
     is_placeholder: bool
     dropped_reasons: dict[str, int] = field(default_factory=dict)
+    provenance: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def provenance_verified(self) -> bool:
+        """Is it recorded where this reference data came from?
+
+        Correct columns are not provenance. A CSV does not become validated
+        data because it parses, and the difference between a curated corpus and
+        somebody's scratch file is not something the software can see.
+        """
+        return all(self.provenance.get(f) for f in MANIFEST_FIELDS)
 
     @property
     def publication_eligible(self) -> bool:
-        return not self.is_placeholder
+        return not self.is_placeholder and self.provenance_verified
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -67,6 +95,8 @@ class CorpusInfo:
             "feature_schema_version": self.feature_schema_version,
             "tool_signature": self.tool_signature,
             "is_placeholder": self.is_placeholder,
+            "provenance": self.provenance,
+            "provenance_verified": self.provenance_verified,
             "publication_eligible": self.publication_eligible,
         }
 
@@ -162,6 +192,11 @@ def build_or_load(
         meta = json.loads(cache_meta.read_text(encoding="utf-8"))
         meta["is_placeholder"] = is_placeholder
         meta["path"] = str(path)
+        # Re-read the manifest rather than trusting the cache: adding
+        # provenance to a library must take effect without a rebuild.
+        meta["provenance"] = read_manifest(path)
+        meta.pop("provenance_verified", None)
+        meta.pop("publication_eligible", None)
         return table, CorpusInfo(**meta)
 
     clean, dropped = load_corpus_table(path, min_len, max_len)
@@ -207,9 +242,11 @@ def build_or_load(
         feature_schema_version=FEATURE_SCHEMA_VERSION,
         tool_signature=signature,
         is_placeholder=is_placeholder,
+        provenance=read_manifest(path),
     )
     payload = info.to_dict()
     payload.pop("publication_eligible")
+    payload.pop("provenance_verified")
     cache_meta.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return table, info
 

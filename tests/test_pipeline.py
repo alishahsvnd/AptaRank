@@ -45,6 +45,44 @@ def test_placeholder_corpus_marks_the_run_ineligible(run_output):
     assert run_output.artifact["run_mode"] == "development"
     assert run_output.artifact["publication_eligible"] is False
     assert run_output.artifact["corpus"]["is_placeholder"] is True
+    assert "placeholder_corpus" in run_output.artifact["development_reasons"]
+
+
+def test_a_corpus_without_provenance_is_not_publishable(tmp_path, request):
+    """Correct columns are not provenance: the software cannot tell a curated
+    library from somebody's scratch file, so it must not claim it can."""
+    import shutil
+
+    from aptarank.tier1.corpus import read_manifest
+
+    source = request.path.parent / "fixtures" / "mini_corpus.csv"
+    corpus = tmp_path / "some_library.csv"
+    shutil.copy(source, corpus)
+
+    cfg = load_config(
+        overrides={
+            "corpus": {"path": str(corpus), "cache_dir": str(tmp_path / "cache")},
+            "tier1": {"n_ensemble_samples": 10, "shuffle": {"enabled": False},
+                      "parallel": {"workers": 1}},
+            "output": {"dir": str(tmp_path / "runs"), "n_diagrams": 0},
+        }
+    )
+    out = run_pipeline(cfg, request.path.parent / "fixtures" / "mini_candidates.csv",
+                       write=False)
+    assert read_manifest(corpus) == {}
+    assert out.artifact["publication_eligible"] is False
+    assert "unverified_corpus_provenance" in out.artifact["development_reasons"]
+
+    # Recording where it came from is what makes it citable.
+    corpus.with_suffix(".manifest.json").write_text(
+        '{"source": "SELEX literature", "curator": "Laura", '
+        '"curated_date": "2026-08-01"}',
+        encoding="utf-8",
+    )
+    out = run_pipeline(cfg, request.path.parent / "fixtures" / "mini_candidates.csv",
+                       write=False)
+    assert out.artifact["publication_eligible"] is True
+    assert out.artifact["corpus"]["provenance"]["curator"] == "Laura"
 
 
 def test_ranks_are_dense_and_ordered_by_tier1_score(run_output):

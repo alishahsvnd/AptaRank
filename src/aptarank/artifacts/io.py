@@ -59,7 +59,8 @@ def build_artifact(
     # target evidence are real. A synthetic cavity invalidates every Tier 2
     # number just as surely as a placeholder corpus invalidates Tier 1.
     synthetic_target = bool((tier2.get("target") or {}).get("synthetic"))
-    development = corpus_info.is_placeholder or synthetic_target
+    unverified_corpus = not corpus_info.is_placeholder and not corpus_info.provenance_verified
+    development = corpus_info.is_placeholder or synthetic_target or unverified_corpus
 
     artifact: dict[str, Any] = {
         "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
@@ -71,6 +72,7 @@ def build_artifact(
             reason for reason, active in (
                 ("placeholder_corpus", corpus_info.is_placeholder),
                 ("synthetic_target_bundle", synthetic_target),
+                ("unverified_corpus_provenance", unverified_corpus),
             ) if active
         ],
         "caveat": TIER2_CAVEAT,
