@@ -49,6 +49,11 @@ class PocketGeometry:
     primary_axis_index: int
     envelope_to_equiv_ratio: float
     shape_warning: bool
+    #: Both fall out of the SVD that d_pocket_A already needed, so they cost
+    #: nothing. `elongation` separates a channel from a round cavity;
+    #: `planarity_A` is small for a flat patch (refinements §4.1).
+    elongation: float = float("nan")
+    planarity_A: float = float("nan")
     quantiles: dict[str, float] = field(
         default_factory=lambda: {"lower": LOWER_Q, "upper": UPPER_Q}
     )
@@ -69,6 +74,8 @@ class PocketGeometry:
             "primary_axis_index": self.primary_axis_index,
             "envelope_to_equiv_ratio": self.envelope_to_equiv_ratio,
             "shape_warning": self.shape_warning,
+            "elongation": self.elongation,
+            "planarity_A": self.planarity_A,
             "quantiles": {**self.quantiles, "method": "linear"},
         }
 
@@ -152,7 +159,25 @@ def pocket_geometry(
         shape_warning=bool(
             math.isfinite(ratio) and (ratio > shape_warning_ratio or ratio < 1 / shape_warning_ratio)
         ),
+        elongation=elongation(sv),
+        planarity_A=planarity(sv, xyz.shape[0]),
     )
+
+
+def elongation(singular_values: Sequence[float]) -> float:
+    """Largest / smallest principal spread. 1 is a ball, large is a channel."""
+    sv = np.asarray(singular_values, dtype=float)
+    if sv.size < 3 or not np.isfinite(sv).all() or sv[2] <= 0:
+        return float("inf") if sv.size >= 3 and sv[0] > 0 else float("nan")
+    return float(sv[0] / sv[2])
+
+
+def planarity(singular_values: Sequence[float], n_points: int) -> float:
+    """Extent along the thinnest principal axis, in A. Small = flat."""
+    sv = np.asarray(singular_values, dtype=float)
+    if sv.size < 3 or n_points <= 0 or not np.isfinite(sv).all():
+        return float("nan")
+    return float(2.0 * sv[2] / math.sqrt(n_points))
 
 
 def _canonical_sign(axis: np.ndarray) -> np.ndarray:
@@ -177,6 +202,70 @@ def aptamer_dimensions(
     return {
         "flexible": a_per_nt * flex_c * math.sqrt(length),
         "extended": a_per_nt * length,
+    }
+
+
+def aptamer_footprint_area(
+    footprint_nt: float, a_per_nt_ss: float, footprint_scale: float
+) -> float:
+    """Contact-area proxy from nucleotide count alone, in A^2.
+
+    The cheap model: area grows linearly with nucleotide count, each nucleotide
+    assumed to cover a square of side `a_per_nt_ss * footprint_scale`. It
+    over-states a compactly folded candidate, since not every nucleotide can
+    touch the surface at once, and it cannot tell two candidates of the same
+    length apart whatever they fold into.
+
+    Kept for comparison and for reproducing earlier runs;
+    `footprint_area_from_radius` is the default.
+    """
+    n = float(footprint_nt)
+    if not math.isfinite(n) or n <= 0:
+        return float("nan")
+    side = float(a_per_nt_ss) * float(footprint_scale)
+    return side * side * n
+
+
+def footprint_area_from_radius(
+    radius_of_gyration_A: float, footprint_scale: float
+) -> float:
+    """Contact-area proxy from the molecule's overall size, in A^2.
+
+    A molecule of gyration radius Rg presents roughly a disc of that radius to a
+    surface, so the contact area is `pi * (Rg * scale)^2`. Rg comes from the
+    secondary structure's element graph (tier1/elements.py), which means this
+    reads the *fold*: an extended helix and a compact four-way junction of the
+    same length no longer get the same answer.
+
+    Known bias, stated rather than hidden: a circle of radius Rg over-states a
+    long thin molecule, which really contacts a surface along a strip about one
+    helix wide. Surface mode's own caveat — coarse shape agreement, not docking
+    — is what that bias lives inside.
+    """
+    radius = float(radius_of_gyration_A)
+    if not math.isfinite(radius) or radius <= 0:
+        return float("nan")
+    scaled = radius * float(footprint_scale)
+    return math.pi * scaled * scaled
+
+
+def area_compatibility(
+    area_apt_A2: float, area_patch_A2: float, sigma_A2: float
+) -> dict[str, float]:
+    """Signed and absolute area mismatch, plus the Gaussian display score.
+
+    Same shape as `compatibility` for pockets, so the banding machinery does not
+    care which mode produced it.
+    """
+    signed = float(area_apt_A2) - float(area_patch_A2)
+    absolute = abs(signed)
+    return {
+        "signed_mismatch_A2": signed,
+        "absolute_mismatch_A2": absolute,
+        "coverage_ratio": (
+            float(area_apt_A2) / float(area_patch_A2) if area_patch_A2 else float("nan")
+        ),
+        "geometric_score": math.exp(-(absolute**2) / (2.0 * float(sigma_A2) ** 2)),
     }
 
 

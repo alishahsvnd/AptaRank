@@ -7,12 +7,14 @@ generated from the same artifacts the live demo displays.
 from __future__ import annotations
 
 import base64
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import altair as alt
 import pandas as pd
 import streamlit as st
 
+from .inputs import BINDING_MODE_DESCRIPTION, BINDING_MODE_LABEL
 from .theme import BAND_LABEL, band_scale, chart_config
 
 CRITERION_LABELS = {
@@ -22,6 +24,29 @@ CRITERION_LABELS = {
     "stem_fraction": "Structural composition",
     "gc_fraction": "Sequence composition",
 }
+
+#: User-facing names for the two tiers (refinements §1.1). The artifact keeps
+#: the paper's vocabulary; every screen uses these.
+TIER1_NAME = "aptamer-likeness"
+TIER2_NAME = "aptamer-target compatibility"
+
+#: The same statement as `aptarank.TIER2_CAVEAT`, in the user-facing wording.
+DISPLAY_CAVEAT = (
+    "Aptamer-target compatibility is a geometric agreement check — it is not "
+    "evidence of binding."
+)
+
+#: What the shuffled-control column is actually testing (§4.8). Shown wherever
+#: the pass/fail appears, because "pass" on its own reads as a verdict on the
+#: candidate rather than on what its score is made of.
+SHUFFLE_HELP = (
+    "Whether this candidate's structure is doing more than its letter "
+    "composition. Each candidate is compared against shuffled versions of "
+    "itself that keep the same nucleotide composition but scramble the order. "
+    "'Pass' means the candidate scores better than ~95% of its own shuffles — "
+    "its structural quality reflects how the sequence is arranged, not just "
+    "which letters it contains."
+)
 
 
 # -- (a) run configuration ----------------------------------------------
@@ -36,19 +61,31 @@ def run_configuration(artifact: Mapping[str, Any]) -> None:
     cols[0].metric("Candidates", f"{inp['n_valid']:,}", f"{inp['n_rejected']} rejected"
                    if inp["n_rejected"] else None)
     cols[1].metric("Target", (target or {}).get("pdb_id", "—"))
-    cols[2].metric("Length bounds", f"{cfg['input']['min_length']}–{cfg['input']['max_length']} nt")
+    cols[2].metric(
+        "Binding mode",
+        BINDING_MODE_LABEL.get(artifact.get("binding_mode"), "—"),
+        help="How the expert asserted an aptamer would engage this target. "
+             "AptaRank does not infer it; the comparison adapts to it.",
+    )
     cols[3].metric("Shuffled controls", cfg["tier1"]["shuffle"]["n_shuffles"])
     cols[4].metric("Seed", cfg["run"]["seed"])
-    cols[5].metric("Tier 1 runtime", f"{artifact['diagnostics']['runtime_seconds']['tier1']:.0f} s")
+    cols[5].metric("Ranking runtime", f"{artifact['diagnostics']['runtime_seconds']['tier1']:.0f} s")
 
     with st.expander("Run provenance", expanded=False):
         left, right = st.columns(2)
+        corpus = artifact["corpus"]
+        # The name the user uploaded, with the hash that actually identifies the
+        # content. Showing only the internal staged filename was a provenance
+        # record of a name nobody recognised.
         left.markdown(
-            f"**Input** `{inp['filename']}`  \n"
+            f"**Sequences** uploaded as `{_display_name(inp)}`  \n"
             f"sha256 `{(inp.get('sha256') or '')[:16]}…`  \n"
-            f"**Corpus** `{artifact['corpus']['corpus_id']}`  \n"
-            f"{artifact['corpus']['n_sequences']:,} reference sequences, "
-            f"{artifact['corpus']['n_dropped']} dropped  \n"
+            f"stored as `{Path(inp['filename']).name if inp.get('filename') else '—'}`  \n"
+            f"**Reference library** uploaded as "
+            f"`{corpus.get('original_filename') or Path(corpus['path']).name}`  \n"
+            f"sha256 `{(corpus.get('corpus_sha256') or '')[:16]}…`  \n"
+            f"{corpus['n_sequences']:,} reference aptamers, "
+            f"{corpus['n_dropped']} dropped  \n"
             f"**Composite method** `{artifact['diagnostics']['composite_method']}`  \n"
             f"**Scoring signature** `{artifact['scoring_signature']}`"
         )
@@ -77,8 +114,8 @@ def ranked_table(candidates: Sequence[Mapping[str, Any]]) -> pd.DataFrame:
             {
                 "rank": c["rank"],
                 "candidate": c["candidate_id"],
-                "Tier 1": c["tier1_score"],
-                "Tier 2 band": BAND_LABEL.get(tier2.get("band", "not_evaluated"), "—"),
+                "aptamer-likeness": c["tier1_score"],
+                "compatibility": BAND_LABEL.get(tier2.get("band", "not_evaluated"), "—"),
                 "shuffle": "pass" if shuffle.get("pass") else ("fail" if shuffle.get("pass") is False else "—"),
                 "len": c.get("length"),
                 "sequence": c["sequence"],
@@ -90,7 +127,7 @@ def ranked_table(candidates: Sequence[Mapping[str, Any]]) -> pd.DataFrame:
 #: The left-hand list stays narrow: the full sequence and every other field are
 #: one click away in the detail panel, and a squeezed table hides its own
 #: columns rather than scrolling them.
-LIST_COLUMNS = ["rank", "candidate", "Tier 1", "Tier 2 band", "shuffle"]
+LIST_COLUMNS = ["rank", "candidate", "aptamer-likeness", "compatibility", "shuffle"]
 
 
 def candidate_list(table: pd.DataFrame, key: str = "ranked") -> int | None:
@@ -104,12 +141,18 @@ def candidate_list(table: pd.DataFrame, key: str = "ranked") -> int | None:
         key=key,
         column_config={
             "rank": st.column_config.NumberColumn("#", width="small"),
-            "Tier 1": st.column_config.ProgressColumn(
-                "Tier 1", min_value=0.0, max_value=1.0, format="%.3f",
-                help="Corpus-calibrated composite. Absolute: it does not depend "
-                     "on what else was submitted.",
+            "aptamer-likeness": st.column_config.ProgressColumn(
+                "aptamer-likeness", min_value=0.0, max_value=1.0, format="%.3f",
+                help="How much this candidate looks like a validated aptamer, "
+                     "calibrated against the reference library. Absolute: it does "
+                     "not depend on what else was submitted.",
             ),
-            "Tier 2 band": st.column_config.TextColumn("Tier 2", width="small"),
+            "compatibility": st.column_config.TextColumn(
+                "compatibility", width="small",
+                help="Aptamer-target compatibility: how well this candidate's "
+                     "shape agrees with the target's binding site, relative to "
+                     "shuffled controls. Not a binding prediction.",
+            ),
             "shuffle": st.column_config.TextColumn("shuffle", width="small"),
         },
     )
@@ -125,15 +168,19 @@ def candidate_detail(candidate: Mapping[str, Any], colors: Mapping[str, Any]) ->
 
     tier2 = candidate.get("tier2") or {}
     shuffle = candidate.get("shuffle") or {}
+    mode = tier2.get("binding_mode", "pocket")
     cols = st.columns(4)
-    cols[0].metric("Tier 1 score", f"{candidate['tier1_score']:.3f}",
+    cols[0].metric("Aptamer-likeness", f"{candidate['tier1_score']:.3f}",
                    help="Corpus-calibrated composite of five named criteria. "
                         "Absolute — independent of the rest of the batch.")
     cols[1].metric(
-        "Tier 2 band", BAND_LABEL.get(tier2.get("band", "not_evaluated"), "—"),
-        help="Control-relative geometric size agreement with this target's "
-             "cavity. 'Strong' means better agreement than ~95% of shuffled "
-             "controls — not a strong candidate, and not evidence of binding.",
+        "Compatibility", BAND_LABEL.get(tier2.get("band", "not_evaluated"), "—"),
+        help=(
+            "How well this candidate's shape agrees with the target's binding "
+            "site, relative to shuffled controls. 'Strong' means better agreement "
+            "than ~95% of controls — not a strong candidate, and not evidence of "
+            "binding. Mode: " + BINDING_MODE_LABEL.get(mode, mode)
+        ),
     )
     cols[2].metric(
         "Shuffled control",
@@ -142,6 +189,7 @@ def candidate_detail(candidate: Mapping[str, Any], colors: Mapping[str, Any]) ->
         # "off": a p-value is not a change, and a green arrow beside it would
         # read as a verdict the number does not carry.
         delta_color="off",
+        help=SHUFFLE_HELP,
     )
     cols[3].metric("Length", f"{candidate.get('length')} nt")
 
@@ -218,11 +266,15 @@ def explanation_panel(candidate: Mapping[str, Any]) -> None:
     if chips:
         st.markdown(chips, unsafe_allow_html=True)
 
+    # The stored caveat is stripped by importing the exact constant rather than
+    # by repeating the sentence here: a copy would stop matching the moment the
+    # canonical wording changed, and the caveat would appear twice.
+    from aptarank import TIER2_CAVEAT
+
     text = candidate.get("explanation") or ""
-    caveat = "Tier 2 reflects geometric plausibility only — it is not evidence of binding."
-    body = text.replace(caveat, "").strip()
+    body = text.replace(TIER2_CAVEAT, "").strip()
     st.write(body)
-    st.markdown(f"<div class='apt-caveat'>{caveat}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='apt-caveat'>{DISPLAY_CAVEAT}</div>", unsafe_allow_html=True)
 
 
 # -- (e) target panel ----------------------------------------------------
@@ -233,62 +285,114 @@ def target_panel(artifact: Mapping[str, Any]) -> None:
     st.markdown("##### Target")
     if not target:
         st.info(
-            "Tier 1 only — no target was supplied for this run, so no "
-            "target-aware evidence exists for any candidate."
+            "Aptamer-likeness only — no target was supplied for this run, so no "
+            "aptamer-target compatibility evidence exists for any candidate."
         )
         return
 
-    pocket = target["selected_pocket"]
-    st.markdown(f"**{target['pdb_id']}** chain {target['chain']}")
+    mode = artifact.get("binding_mode") or target.get("binding_mode") or "pocket"
+    st.markdown(f"**{target.get('identifier', target['pdb_id'])}** chain {target['chain']}")
     if target.get("name"):
         st.caption(target["name"])
+    st.caption(
+        f"{BINDING_MODE_LABEL.get(mode, mode)} — {BINDING_MODE_DESCRIPTION.get(mode, '')}"
+    )
 
-    cols = st.columns(2)
-    cols[0].metric("Cavities detected", target["n_pockets"])
-    cols[1].metric("Selected pocket", f"#{pocket['index']}")
-    cols[0].metric("Characteristic width", f"{pocket['d_pocket_A']:.1f} Å")
-    cols[1].metric("Volume", f"{pocket['volume_A3']:.0f} Å³")
-
-    method = target["pocket_selection"]
-    if method == "active_site_overlap":
-        st.caption("Pocket selected by overlap with literature-confirmed active-site residues.")
-    else:
+    if target.get("structure_kind") == "predicted":
         st.warning(
-            f"Pocket selected automatically (`{method}`) — fpocket's own score is "
-            f"not guaranteed to identify the functional cavity.",
+            "Predicted structure (AlphaFold), not an experiment."
+            + (" A predicted model may not show an interface that only forms when "
+               "a binding partner is present, so treat this with extra caution."
+               if mode == "surface" else ""),
             icon="⚠️",
         )
-    for warning in target.get("selection_warnings", []):
+
+    patch = target.get("patch")
+    pocket = target.get("selected_pocket")
+    if mode == "surface" and patch:
+        cols = st.columns(2)
+        cols[0].metric("Binding-site area", f"{patch['patch_area_A2']:.0f} Å²")
+        cols[1].metric("Site residues", patch["n_residues"])
+        cols[0].metric("Flatness", f"{patch['planarity_A']:.1f} Å",
+                       help="Thickness across the thinnest direction of the patch. "
+                            "Smaller is flatter.")
+        cols[1].metric("Elongation", f"{patch['elongation']:.2f}",
+                       help="Longest / shortest spread. Near 1 is round; large is "
+                            "groove-like.")
+        st.caption(
+            f"Area measured with freeSASA over the {patch['n_residues']} "
+            f"binding-site residues you specified, on the isolated chain."
+        )
+        if patch.get("buried_residue_numbers"):
+            st.warning(
+                f"Binding-site residues {patch['buried_residue_numbers']} have no "
+                f"exposed surface — check the residue numbering and chain.",
+                icon="⚠️",
+            )
+        if patch.get("shape_warning"):
+            st.warning(
+                "This patch is not flat. Surface-mode agreement assumes a roughly "
+                "planar face, so read the band with that in mind.",
+                icon="⚠️",
+            )
+    elif pocket:
+        cols = st.columns(2)
+        cols[0].metric("Cavities detected", target["n_pockets"])
+        cols[1].metric("Selected cavity", f"#{pocket['index']}")
+        cols[0].metric("Characteristic width", f"{pocket['d_pocket_A']:.1f} Å")
+        cols[1].metric("Volume", f"{pocket['volume_A3']:.0f} Å³")
+
+        method = target.get("pocket_selection")
+        if method in ("target_site_overlap", "active_site_overlap"):
+            st.caption(
+                "Cavity selected by overlap with literature-confirmed "
+                "binding-site residues."
+            )
+        else:
+            st.warning(
+                f"Cavity selected automatically (`{method}`) — fpocket's own score "
+                f"is not guaranteed to identify the functional cavity.",
+                icon="⚠️",
+            )
+        if pocket.get("shape_warning"):
+            st.warning(
+                "This cavity is oddly shaped: its robust extent and equivalent-sphere "
+                "diameter disagree by more than 2×. The geometric comparison assumes a "
+                "roughly convex pocket.",
+                icon="⚠️",
+            )
+
+    for warning in [*(target.get("selection_warnings") or []),
+                    *(target.get("preparation_warnings") or [])]:
         st.warning(warning, icon="⚠️")
-    if pocket.get("shape_warning"):
-        st.warning(
-            "This cavity is oddly shaped: its robust extent and equivalent-sphere "
-            "diameter disagree by more than 2×. The geometric comparison assumes a "
-            "roughly convex pocket.",
-            icon="⚠️",
-        )
 
     status = target.get("electrostatics_status")
-    if status == "success":
+    if status == "success" and target.get("electrostatic_mean_potential") is not None:
         potential = target["electrostatic_mean_potential"]
         compatible = target["electrostatic_compatible"]
         st.metric(
-            "Cavity electrostatics",
+            "Binding-site electrostatics",
             f"{potential:+.2f} kT/e",
             "hospitable to RNA" if compatible else "repulsive to RNA",
             delta_color="off",
         )
-        st.caption("Target-level only: identical for every candidate, so it is "
-                   "deliberately not part of any per-candidate score.")
+        st.caption(
+            "A property of the target: identical for every candidate. In surface "
+            "mode it is part of the reported agreement score, but because it is "
+            "the same for everyone it can never reorder candidates or change a band."
+            if mode == "surface" else
+            "Target-level only: identical for every candidate, so it is "
+            "deliberately not part of any per-candidate score."
+        )
     else:
         st.caption(f"Electrostatics: {status or 'not computed'}.")
 
     if target.get("retained_hetero"):
         st.caption(
             f"Retained non-water hetero groups: {', '.join(sorted(set(target['retained_hetero'])))} "
-            f"— these shape the detected cavity."
+            f"— these shape the measured site."
         )
-    st.caption(f"Target bundle `{target['bundle_id'][:12]}`")
+    st.caption(f"Prepared target `{target['bundle_id'][:12]}`")
 
 
 # -- (f) Tier 1 vs Tier 2 scatter ---------------------------------------
@@ -311,8 +415,10 @@ def tier_scatter(
                 "candidate": c["candidate_id"],
                 "rank": c["rank"],
                 "tier1": c["tier1_score"],
-                "control_percentile": tier2.get("control_percentile_flexible"),
-                "mismatch": tier2.get("absolute_mismatch_flexible_A"),
+                "control_percentile": tier2.get(
+                    "control_percentile", tier2.get("control_percentile_flexible")
+                ),
+                "mismatch": tier2.get("disagreement"),
                 "band": BAND_LABEL.get(tier2.get("band", "not_evaluated")),
                 "selected": c["candidate_id"] == selected_id,
             }
@@ -320,6 +426,7 @@ def tier_scatter(
     if not rows:
         return None
 
+    units = (thresholds or {}).get("units", "Å")
     frame = pd.DataFrame(rows)
     # Only the bands actually present: a legend entry with no points on the
     # plot invites the reader to hunt for a category that isn't there.
@@ -337,23 +444,24 @@ def tier_scatter(
         alt.Chart(frame)
         .mark_circle(size=90, opacity=0.85, stroke=colors["surface"], strokeWidth=2)
         .encode(
-            x=alt.X("tier1:Q", title="Tier 1 score (intrinsic quality)",
+            x=alt.X("tier1:Q", title="Aptamer-likeness",
                     scale=alt.Scale(zero=False, nice=True),
                     axis=alt.Axis(tickCount=8)),
-            y=alt.Y("control_percentile:Q", title="Tier 2 control percentile",
+            y=alt.Y("control_percentile:Q",
+                    title="Aptamer-target compatibility (control percentile)",
                     scale=alt.Scale(domain=[0, 1])),
             color=alt.Color(
                 "band:N",
-                title="Control-relative geometric agreement",
+                title="Compatibility, relative to shuffled controls",
                 scale=alt.Scale(domain=domain, range=range_),
                 legend=alt.Legend(orient="top", direction="horizontal"),
             ),
             tooltip=[
                 alt.Tooltip("candidate:N", title="Candidate"),
                 alt.Tooltip("rank:Q", title="Rank"),
-                alt.Tooltip("tier1:Q", title="Tier 1", format=".3f"),
+                alt.Tooltip("tier1:Q", title="Aptamer-likeness", format=".3f"),
                 alt.Tooltip("control_percentile:Q", title="Control percentile", format=".3f"),
-                alt.Tooltip("mismatch:Q", title="Loop/cavity mismatch (Å)", format=".1f"),
+                alt.Tooltip("mismatch:Q", title=f"Size mismatch ({units})", format=".1f"),
                 alt.Tooltip("band:N", title="Band"),
             ],
         )
@@ -392,13 +500,26 @@ def threshold_caption(thresholds: Mapping[str, Any] | None) -> str:
     if not thresholds:
         return ""
     bands = thresholds.get("band_percentiles") or {}
+    target = thresholds.get("target") or {}
+    if thresholds.get("binding_mode") == "surface":
+        model = (thresholds.get("parameters") or {}).get("footprint_model", "")
+        described = (
+            "the folded molecule's size" if model == "radius_of_gyration"
+            else "nucleotide count"
+        )
+        measured = (
+            f"binding-site patch ({target.get('patch_area_A2', float('nan')):.0f} Å²), "
+            f"with each candidate's footprint taken from {described}"
+        )
+    else:
+        measured = f"cavity ({target.get('d_pocket_A', float('nan')):.1f} Å)"
     return (
         f"Dashed lines: moderate ≥ {bands.get('moderate', 0.75):.2f}, "
         f"strong ≥ {bands.get('strong', 0.95):.2f} of the control distribution. "
         f"Bands are relative to {thresholds.get('n_controls', 0):,} fixed "
-        f"dinucleotide-shuffled controls scored against this same cavity "
-        f"({thresholds.get('d_pocket_A', float('nan')):.1f} Å) — not to the other "
-        f"candidates in this batch, so they do not shift when the batch changes."
+        f"dinucleotide-shuffled controls scored against this same {measured} — "
+        f"not to the other candidates in this batch, so they do not shift when "
+        f"the batch changes."
     )
 
 
@@ -411,6 +532,13 @@ def independence_caption(diagnostics: Mapping[str, Any]) -> str:
         interpretation = interpretation[0].upper() + interpretation[1:] + "."
     return (
         f"Spearman ρ = {spearman['rho']:+.3f} (p = {spearman['p_value']:.3g}, "
-        f"n = {spearman['n']}) between Tier 1 score and the Tier 2 control percentile. "
-        f"{interpretation}"
+        f"n = {spearman['n']}) between aptamer-likeness and the compatibility "
+        f"control percentile. {interpretation}"
+    )
+
+
+def _display_name(inp: Mapping[str, Any]) -> str:
+    """What the user called their file, falling back to what is on disk."""
+    return inp.get("original_filename") or (
+        Path(inp["filename"]).name if inp.get("filename") else "—"
     )

@@ -82,6 +82,13 @@ start)
     fi
     mkdir -p "$DATA_DIR/logs"
 
+    # Streamlit resolves .streamlit/config.toml relative to the working
+    # directory, so the service has to start from the checkout or the app's
+    # theme is silently never applied and the dashboard follows whatever the
+    # viewer's system preference happens to be. Everything else here uses
+    # absolute paths, and analyses get their own cwd in dashboard/jobs.py.
+    cd "$APP_DIR"
+
     # nice: this is a background service on someone else's compute box.
     nohup nice -n 10 "$PY" -m streamlit run "$APP_DIR/dashboard/streamlit_app.py" \
         --server.address "$BIND" \

@@ -12,17 +12,18 @@ undefined for small batches. Instead we bank a fixed set of dinucleotide
 shuffles drawn from the reference corpus, once, and reuse it for every target
 and every batch.
 
-The bank's loop descriptors are target-independent, so the expensive part —
-folding and ensemble sampling — is done once and cached alongside the corpus.
-Only the arithmetic that involves the pocket is redone per target.
+The bank's descriptors are target- *and* mode-independent, so the expensive part
+— folding and ensemble sampling — is done once and cached alongside the corpus.
+Only the arithmetic that involves the target is redone per target, and switching
+binding mode just reads a different column of the same bank.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -32,55 +33,85 @@ from ..errors import CorpusError
 from ..provenance import derive_seed, sha256_text
 from ..tier1 import features as feature_mod
 from ..tier1 import folding, shuffles
+from ..tier1 import corpus as corpus_cache
 from ..tier1.corpus import CorpusInfo
-from .geometry import aptamer_dimensions, compatibility
+from . import modes
 
 BANK_SCHEMA_VERSION = "calibration-bank-v1"
 
 
 @dataclass
 class CalibrationBank:
-    """Fixed shuffled controls with their ensemble loop descriptors."""
+    """Fixed shuffled controls with the descriptors every mode compares.
+
+    Both descriptors are folded once and cached together, so switching binding
+    mode costs no recomputation — only the arithmetic that involves the target
+    is redone.
+    """
 
     bank_id: str
     loop_nt_median: np.ndarray
     meta: dict[str, Any]
+    length: np.ndarray | None = None
+    rg_median_A: np.ndarray | None = None
 
     @property
     def size(self) -> int:
         return int(self.loop_nt_median.size)
 
+    def descriptor(self, mode: str, params: Mapping[str, Any] | None = None) -> np.ndarray:
+        """The control values this mode compares (refinements §4.2)."""
+        column = modes.descriptor_column(modes.check_mode(mode), params or {})
+        values = {
+            "loop_nt_median": self.loop_nt_median,
+            "length": self.length,
+            "rg_median_A": self.rg_median_A,
+        }.get(column)
+        if values is None:
+            raise CorpusError(
+                f"the cached calibration bank has no {column!r} column, which "
+                f"{mode} mode needs. Delete the bank cache to rebuild it."
+            )
+        return np.asarray(values, dtype=float)
+
 
 @dataclass
 class ControlDistribution:
-    """The bank's absolute mismatches against one specific target pocket."""
+    """The bank's disagreements against one specific target, in one mode.
 
-    sorted_absolute_mismatch_A: np.ndarray
+    "Disagreement" is whatever the mode compares — an Å mismatch between loop
+    reach and cavity width, an Å² mismatch between footprint and patch area —
+    always with lower meaning better agreement, so one percentile definition
+    serves every mode.
+    """
+
+    sorted_disagreement: np.ndarray
     bank_id: str
-    d_pocket_A: float
-    descriptor: str
+    mode: str
+    units: str
     n: int
+    target: dict[str, Any] = field(default_factory=dict)
 
-    def percentile(self, absolute_mismatch: float | np.ndarray) -> np.ndarray:
+    def percentile(self, disagreement: float | np.ndarray) -> np.ndarray:
         """One-sided mid-rank percentile, higher = better geometric agreement.
 
             P = (#{Δ_control > Δ} + 0.5 #{Δ_control = Δ}) / B
 
-        Defined on the absolute mismatch rather than the Gaussian score: the
-        Gaussian underflows for large mismatches and depends on `sigma`, and a
-        band should not move because a display parameter changed.
+        Defined on the raw disagreement rather than the Gaussian display score:
+        the Gaussian underflows for large mismatches and depends on `sigma`, and
+        a band must not move because a display parameter changed.
         """
-        x = np.atleast_1d(np.asarray(absolute_mismatch, dtype=float))
-        ref = self.sorted_absolute_mismatch_A
+        x = np.atleast_1d(np.asarray(disagreement, dtype=float))
+        ref = self.sorted_disagreement
         left = np.searchsorted(ref, x, side="left")
         right = np.searchsorted(ref, x, side="right")
         greater = ref.size - right
         equal = right - left
         return (greater + 0.5 * equal) / ref.size
 
-    def quantile_mismatch(self, percentile: float) -> float:
-        """The mismatch at a given control percentile — a UI reference line."""
-        return float(np.quantile(self.sorted_absolute_mismatch_A, 1.0 - percentile))
+    def quantile_disagreement(self, percentile: float) -> float:
+        """The disagreement at a given control percentile — a UI reference line."""
+        return float(np.quantile(self.sorted_disagreement, 1.0 - percentile))
 
 
 def assign_band(percentile: float | None, moderate: float, strong: float) -> str:
@@ -129,11 +160,19 @@ def build_or_load(
     meta_path = cache_dir / f"{bank_id}.meta.json"
 
     if csv_path.exists() and meta_path.exists():
-        table = pd.read_csv(csv_path)
+        table = corpus_cache.read_feature_cache(csv_path)
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         return CalibrationBank(
             bank_id=bank_id,
             loop_nt_median=table["loop_nt_median"].to_numpy(dtype=float),
+            length=(
+                table["length"].to_numpy(dtype=float)
+                if "length" in table.columns else None
+            ),
+            rg_median_A=(
+                table["rg_median_A"].to_numpy(dtype=float)
+                if "rg_median_A" in table.columns else None
+            ),
             meta=meta,
         )
 
@@ -176,6 +215,8 @@ def build_or_load(
                 n_ensemble_samples=n_samples,
                 n_shuffles=0,
                 seed=seed,
+                a_per_bp_helix=float(cfg.get("tier2.geometry.a_per_bp_helix")),
+                a_per_nt_ss=float(cfg.get("tier2.geometry.a_per_nt_ss")),
             )
         )
         provenance.append(
@@ -201,11 +242,16 @@ def build_or_load(
     table = table.merge(pd.DataFrame(provenance), left_on="candidate_id",
                         right_on="control_id", how="left")
     keep = ["control_id", "source_id", "shuffle_index", "identical_to_source",
-            "length", "loop_nt_median", "loop_nt_p90", "loop_nt_iqr"]
+            "length", "loop_nt_median", "loop_nt_p90", "loop_nt_iqr",
+            "rg_median_A", "rg_iqr_A"]
     table = table[keep]
 
     cache_dir.mkdir(parents=True, exist_ok=True)
-    table.to_csv(csv_path, index=False)
+    corpus_cache.write_feature_cache(table, csv_path)
+    # Same reason as the corpus cache: project the bank from the bytes that were
+    # stored, so the run that builds it bands candidates exactly like the runs
+    # that reuse it.
+    table = corpus_cache.read_feature_cache(csv_path)
     meta = {
         "bank_id": bank_id,
         "schema_version": BANK_SCHEMA_VERSION,
@@ -218,6 +264,14 @@ def build_or_load(
         "loop_summary_convention": "median of max_loop_nt over h/i/m forgi "
                                    "elements across sampled structures; "
                                    "numpy.median, linear interpolation",
+        "size_summary_convention": "median radius of gyration across sampled "
+                                   "structures, mass-weighted over the forgi "
+                                   "element graph (stems as rigid A-form rods, "
+                                   "unpaired regions as Gaussian segments)",
+        "geometry": {
+            "a_per_bp_helix": cfg.get("tier2.geometry.a_per_bp_helix"),
+            "a_per_nt_ss": cfg.get("tier2.geometry.a_per_nt_ss"),
+        },
         "n_controls": len(table),
         "n_failed": len(failures),
         "n_identical_to_source": int(table["identical_to_source"].sum()),
@@ -232,99 +286,146 @@ def build_or_load(
     return CalibrationBank(
         bank_id=bank_id,
         loop_nt_median=table["loop_nt_median"].to_numpy(dtype=float),
+        length=table["length"].to_numpy(dtype=float),
+        rg_median_A=table["rg_median_A"].to_numpy(dtype=float),
         meta=meta,
     )
 
 
 def target_distribution(
     bank: CalibrationBank,
-    d_pocket_A: float,
-    a_per_nt: float,
-    flex_c: float,
-    sigma_A: float,
-    descriptor: str = "flexible",
+    mode: str,
+    target: Mapping[str, Any],
+    params: Mapping[str, Any],
 ) -> ControlDistribution:
-    """Project the bank onto one target. Pure arithmetic — cheap per target."""
-    dims = np.array(
+    """Project the bank onto one target in one mode. Cheap: pure arithmetic."""
+    modes.check_mode(mode)
+    values = bank.descriptor(mode, params)
+    disagreements = np.array(
         [
-            aptamer_dimensions(float(loop), a_per_nt, flex_c)[descriptor]
-            for loop in bank.loop_nt_median
-        ]
+            modes.compare(mode, float(v), target, params)["disagreement"]
+            for v in values
+            if modes.is_evaluable(v)
+        ],
+        dtype=float,
     )
-    mismatches = np.abs(dims - float(d_pocket_A))
+    if disagreements.size == 0:
+        raise CorpusError(
+            f"no calibration control produced a usable {mode}-mode measurement; "
+            f"the bank cannot calibrate this target"
+        )
     return ControlDistribution(
-        sorted_absolute_mismatch_A=np.sort(mismatches),
+        sorted_disagreement=np.sort(disagreements),
         bank_id=bank.bank_id,
-        d_pocket_A=float(d_pocket_A),
-        descriptor=descriptor,
-        n=int(mismatches.size),
+        mode=mode,
+        units=modes.MISMATCH_UNITS[mode],
+        n=int(disagreements.size),
+        target=dict(target),
     )
+
+
+def secondary_distributions(
+    bank: CalibrationBank,
+    mode: str,
+    target: Mapping[str, Any],
+    params: Mapping[str, Any],
+) -> dict[str, ControlDistribution]:
+    """Sensitivity distributions reported alongside the primary one.
+
+    Pocket mode keeps contour length as the documented upper bound on loop
+    reach; it is reported, never banded on.
+    """
+    if mode != modes.POCKET or params.get("primary_descriptor") != "flexible":
+        return {}
+    extended = dict(params)
+    extended["primary_descriptor"] = "extended"
+    return {"extended": target_distribution(bank, mode, target, extended)}
 
 
 def thresholds(dist: ControlDistribution, moderate: float, strong: float) -> dict[str, Any]:
-    """Band boundaries expressed in Å, for the dashboard's reference lines."""
-    return {
+    """Band boundaries in the mode's own units, for the dashboard's reference lines."""
+    out = {
         "bank_id": dist.bank_id,
         "n_controls": dist.n,
-        "descriptor": dist.descriptor,
-        "d_pocket_A": dist.d_pocket_A,
+        "binding_mode": dist.mode,
+        "units": dist.units,
+        "target": dist.target,
         "band_percentiles": {"moderate": moderate, "strong": strong},
-        "mismatch_at_moderate_A": dist.quantile_mismatch(moderate),
-        "mismatch_at_strong_A": dist.quantile_mismatch(strong),
-        "control_mismatch_median_A": float(np.median(dist.sorted_absolute_mismatch_A)),
+        "disagreement_at_moderate": dist.quantile_disagreement(moderate),
+        "disagreement_at_strong": dist.quantile_disagreement(strong),
+        "control_disagreement_median": float(np.median(dist.sorted_disagreement)),
     }
+    if dist.mode == modes.POCKET:
+        # Names the pocket-mode dashboard and earlier artifacts already use.
+        out.update(
+            d_pocket_A=dist.target.get("d_pocket_A"),
+            mismatch_at_moderate_A=out["disagreement_at_moderate"],
+            mismatch_at_strong_A=out["disagreement_at_strong"],
+            control_mismatch_median_A=out["control_disagreement_median"],
+        )
+    return out
 
 
 def score_candidates(
-    loop_nt_medians: Sequence[float],
-    d_pocket_A: float,
-    dist_flexible: ControlDistribution,
-    dist_extended: ControlDistribution,
-    a_per_nt: float,
-    flex_c: float,
-    sigma_A: float,
+    values: Sequence[float],
+    mode: str,
+    target: Mapping[str, Any],
+    params: Mapping[str, Any],
+    distribution: ControlDistribution,
     moderate: float,
     strong: float,
+    secondary: Mapping[str, ControlDistribution] | None = None,
 ) -> list[dict[str, Any]]:
     """Per-candidate Tier 2 record. The band comes from the control percentile."""
+    modes.check_mode(mode)
+    secondary = dict(secondary or {})
     records = []
-    for loop in loop_nt_medians:
-        loop = float(loop)
-        if not np.isfinite(loop) or loop <= 0:
-            # No accessible loop is not a zero-sized aptamer — it is an absence
-            # of the measurement Tier 2 depends on.
+    for raw in values:
+        if not modes.is_evaluable(raw):
+            # A missing descriptor is not a zero-sized aptamer — it is an
+            # absence of the measurement this mode depends on.
+            value = float(raw) if np.isfinite(_as_float(raw)) else None
             records.append(
-                {"status": "not_evaluable_no_contact_loop", "band": "not_evaluated",
-                 "loop_nt_median": loop if np.isfinite(loop) else None}
+                {
+                    "status": modes.not_evaluable_status(mode),
+                    "band": "not_evaluated",
+                    "binding_mode": mode,
+                    modes.descriptor_column(mode, params): value,
+                }
             )
             continue
 
-        dims = aptamer_dimensions(loop, a_per_nt, flex_c)
-        flex = compatibility(dims["flexible"], d_pocket_A, sigma_A)
-        ext = compatibility(dims["extended"], d_pocket_A, sigma_A)
-        p_flex = float(dist_flexible.percentile(flex["absolute_mismatch_A"])[0])
-        p_ext = float(dist_extended.percentile(ext["absolute_mismatch_A"])[0])
-
-        records.append(
-            {
-                "status": "evaluated",
-                "loop_nt_median": loop,
-                "d_pocket_A": float(d_pocket_A),
-                "d_apt_flexible_A": dims["flexible"],
-                "signed_mismatch_flexible_A": flex["signed_mismatch_A"],
-                "absolute_mismatch_flexible_A": flex["absolute_mismatch_A"],
-                "geometric_score_flexible": flex["geometric_score"],
-                "control_percentile_flexible": p_flex,
-                "d_apt_extended_A": dims["extended"],
-                "signed_mismatch_extended_A": ext["signed_mismatch_A"],
-                "absolute_mismatch_extended_A": ext["absolute_mismatch_A"],
-                "geometric_score_extended": ext["geometric_score"],
-                "control_percentile_extended": p_ext,
-                # Primary, for display and for the explanation templates.
-                "d_apt_A": dims["flexible"],
-                "difference_A": flex["signed_mismatch_A"],
-                "score": p_flex,
-                "band": assign_band(p_flex, moderate, strong),
-            }
-        )
+        result = modes.compare(mode, float(raw), target, params)
+        percentile = float(distribution.percentile(result["disagreement"])[0])
+        record = {
+            "status": "evaluated",
+            "binding_mode": mode,
+            **result["fields"],
+            "disagreement": result["disagreement"],
+            "disagreement_units": distribution.units,
+            # Paper-side vocabulary (§1.1). `score` stays as the display alias.
+            "geometric_agreement_score": result["agreement"],
+            "geometric_agreement_percentile": percentile,
+            "control_percentile": percentile,
+            "score": percentile,
+            "band": assign_band(percentile, moderate, strong),
+        }
+        for name, dist in secondary.items():
+            variant = dict(params)
+            variant["primary_descriptor"] = name
+            alternative = modes.compare(mode, float(raw), target, variant)
+            record[f"control_percentile_{name}"] = float(
+                dist.percentile(alternative["disagreement"])[0]
+            )
+        if mode == modes.POCKET:
+            # The banded quantity, under the name the dashboard and E3/E4 use.
+            record["control_percentile_flexible"] = percentile
+        records.append(record)
     return records
+
+
+def _as_float(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float("nan")

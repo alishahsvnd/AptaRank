@@ -30,7 +30,13 @@ from ..tier1.service import Tier1Result
 ELEMENT_FIELDS = (
     "n_hairpins", "n_interior", "n_multiloop", "n_stems", "stem_fraction",
     "longest_stem_bp", "max_loop_nt", "total_unpaired",
-    "loop_nt_median", "loop_nt_p90", "loop_nt_iqr", "n_ensemble_samples",
+    "loop_nt_median", "loop_nt_p90", "loop_nt_iqr",
+    # Overall molecular size (R§4.2, R§6). Recorded for every candidate, not
+    # only surface-mode ones: the artifact is the reproducibility record, and a
+    # descriptor that was computed should be readable from it whether or not
+    # this particular run's mode happened to compare it.
+    "radius_of_gyration_A", "rg_median_A", "rg_iqr_A",
+    "n_ensemble_samples",
 )
 
 
@@ -76,6 +82,9 @@ def build_artifact(
             ) if active
         ],
         "caveat": TIER2_CAVEAT,
+        # Which geometry Tier 2 compared. Null when no target was scored.
+        "binding_mode": tier2.get("binding_mode"),
+        "structure_source": (tier2.get("target") or {}).get("structure_kind"),
         "config": cfg.as_dict(),
         "config_sources": cfg.sources,
         "scoring_signature": cfg.scoring_signature(),

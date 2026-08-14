@@ -67,6 +67,8 @@ def run(
             n_shuffles=n_shuffles,
             shuffle_k=int(cfg.get("tier1.shuffle.k")),
             seed=seed,
+            a_per_bp_helix=float(cfg.get("tier2.geometry.a_per_bp_helix")),
+            a_per_nt_ss=float(cfg.get("tier2.geometry.a_per_nt_ss")),
         )
         for row in ingested.candidates.itertuples()
     ]

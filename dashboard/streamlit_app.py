@@ -101,9 +101,10 @@ def main() -> None:
             )
         st.divider()
         st.caption(
-            "Tier 1 ranks candidates on intrinsic structure. Tier 2 annotates "
-            "them with control-relative geometric agreement against a target — "
-            "never a binding prediction, and it never changes the ranking."
+            "Tier 1 ranks candidates on aptamer-likeness. Tier 2 annotates them "
+            "with aptamer-target compatibility by performing a geometric "
+            "agreement check against a target. Tier 2 is not a binding "
+            "prediction, and it does not change the Tier 1 ranking."
         )
 
     if view == "New analysis":
@@ -179,13 +180,10 @@ def _results_view(runs_dir: Path) -> None:
         st.success("Publication-eligible run", icon="✅")
     else:
         reasons = artifact.get("development_reasons") or ["development settings"]
-        pretty = {
-            "placeholder_corpus": "the reference library is synthetic example data",
-            "synthetic_target_bundle": "the target cavity was fabricated for testing",
-            "unverified_corpus_provenance":
-                "the reference library has no provenance record, so where it came "
-                "from cannot be cited",
-        }
+        # The same wording, from the same table, as the New Analysis page shows
+        # before the run — the two verdicts must never read differently.
+        from dashboard.inputs import DEVELOPMENT_REASON_TEXT as pretty
+
         st.markdown(
             "<div class='apt-dev-banner'><b>Development run — not a result.</b> "
             + "; ".join(pretty.get(r, r) for r in reasons)
@@ -203,7 +201,7 @@ def _results_view(runs_dir: Path) -> None:
 
     with left:
         st.markdown("##### Ranked candidates")
-        st.caption(f"{len(candidates):,} scored · Tier 1 order")
+        st.caption(f"{len(candidates):,} scored · ranked by aptamer-likeness")
         selected_row = views.candidate_list(table)
 
     candidate = candidates[selected_row if selected_row is not None else 0]
@@ -216,15 +214,15 @@ def _results_view(runs_dir: Path) -> None:
         views.target_panel(artifact)
 
     st.divider()
-    st.markdown("##### Tier 1 vs Tier 2")
+    st.markdown("##### Aptamer-likeness vs aptamer-target compatibility")
     chart = views.tier_scatter(
         candidates, artifact.get("tier2_thresholds"), artifact["diagnostics"],
         colors, selected_id=candidate["candidate_id"],
     )
     if chart is None:
         st.info(
-            "No target-aware evidence in this analysis. Add a prepared target to "
-            "compare intrinsic quality against geometric plausibility.",
+            "No target was used in this analysis. Add a protein target to annotate "
+            "each candidate with aptamer-target compatibility.",
             icon="ℹ️",
         )
     else:
@@ -233,7 +231,7 @@ def _results_view(runs_dir: Path) -> None:
         st.caption(views.independence_caption(artifact["diagnostics"]))
         with st.expander("Table view of the plotted points"):
             st.dataframe(
-                table[table["Tier 2 band"] != "not evaluated"],
+                table[table["compatibility"] != "not evaluated"],
                 hide_index=True, use_container_width=True,
             )
 

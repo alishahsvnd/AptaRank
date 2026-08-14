@@ -223,13 +223,19 @@ def submit(
     *,
     name: str | None = None,
     corpus_is_placeholder: bool = False,
-    bundle_path: str | Path | None = None,
+    target: Any = None,
     preset: str = "standard",
     extra_sets: Sequence[str] = (),
     job_id: str | None = None,
     python_executable: str | None = None,
 ) -> Job:
-    """Queue a run. It starts immediately if a slot is free, else it waits."""
+    """Queue a run. It starts immediately if a slot is free, else it waits.
+
+    `target` is a `dashboard.inputs.TargetRequest`: either a target already
+    prepared on disk, or a description the pipeline will prepare server-side.
+    Either way the launch is the same `aptarank run` command a reviewer could
+    type, which is what keeps the dashboard free of computation of its own.
+    """
     job_id = job_id or new_job_id()
     directory = jobs_root(runs_dir) / job_id
     (directory / "inputs").mkdir(parents=True, exist_ok=True)
@@ -248,8 +254,28 @@ def submit(
         command += ["--development-corpus", str(corpus_path)]
     else:
         command += ["--corpus", str(corpus_path)]
-    if bundle_path:
-        command += ["--target-bundle", str(bundle_path)]
+
+    target_record: dict[str, Any] | None = None
+    if target is not None and getattr(target, "kind", "none") != "none":
+        if target.kind == "prepared":
+            # The mode is passed explicitly, not left to the config default:
+            # picking a target that was measured for surface mode is the user
+            # asserting surface mode, and the launched command should say so
+            # rather than relying on anything downstream to infer it.
+            command += ["--target-bundle", str(target.prepared.path),
+                        "--binding-mode", target.binding_mode]
+            target_record = {"kind": "prepared", "label": target.label,
+                             "binding_mode": target.binding_mode,
+                             "path": str(target.prepared.path)}
+        else:
+            # The description is written into the job directory and passed by
+            # path, so the exact target this run used stays with the run.
+            spec_file = directory / "inputs" / "target.txt"
+            spec_file.write_text(target.spec_text.strip() + "\n", encoding="utf-8")
+            command += ["--target-file", str(spec_file)]
+            target_record = {"kind": "spec", "label": target.label,
+                             "binding_mode": target.binding_mode,
+                             "path": str(spec_file)}
 
     settings = preset_settings(preset) + list(extra_sets)
     if WORKERS_PER_JOB:
@@ -270,11 +296,12 @@ def submit(
         "candidates": str(candidates_path),
         "corpus": str(corpus_path),
         "corpus_is_placeholder": corpus_is_placeholder,
-        "target_bundle": str(bundle_path) if bundle_path else None,
+        "target": target_record,
     }
     (directory / "request.json").write_text(json.dumps(request, indent=2), encoding="utf-8")
 
-    job = Job(job_id=job_id, directory=directory, request=request)
+    # Rebuilt from disk after pump(), which may have started it and written a
+    # pid into the request file.
     pump(runs_dir)
     return Job(job_id=job_id, directory=directory,
                request=json.loads((directory / "request.json").read_text(encoding="utf-8")))
@@ -344,7 +371,7 @@ PRESET_DESCRIPTIONS = {
     "standard": ("Standard analysis", "20 shuffled controls per sequence, 100 sampled "
                                       "structures. The everyday setting."),
     "evaluation": ("Rigorous (slowest)", "99 shuffled controls per sequence, 200 sampled "
-                                         "structures. Needed for statistics quoted in "
+                                         "structures. Best for statistics quoted in "
                                          "a paper."),
 }
 
@@ -387,12 +414,20 @@ def slots(runs_dir: str | Path) -> dict[str, int]:
     }
 
 
-def estimate_runtime_s(n_candidates: int, preset: str, with_target: bool) -> tuple[int, int]:
+def estimate_runtime_s(
+    n_candidates: int,
+    preset: str,
+    with_target: bool,
+    prepare_target: bool = False,
+) -> tuple[int, int]:
     """A deliberately wide range. An estimate presented as exact is a lie."""
     per_candidate = {"quick": 0.02, "standard": 0.30, "evaluation": 1.30}.get(preset, 0.30)
     base = n_candidates * per_candidate
     if with_target:
         base += 90     # calibration bank, first time only
+    if prepare_target:
+        # Download, chain selection, fpocket, freeSASA and APBS, once per target.
+        base += 120
     return max(5, int(base * 0.6)), max(15, int(base * 1.8))
 
 

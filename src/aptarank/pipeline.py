@@ -18,6 +18,7 @@ from .artifacts import build_artifact, write_artifact
 from .artifacts.explanation import explain
 from .artifacts.rendering import render_diagrams
 from .config import Config
+from .errors import TargetError
 from .ingest import ingest
 from .progress import ProgressReporter
 from .tier1 import corpus as corpus_mod
@@ -29,6 +30,59 @@ class RunOutput:
     artifact: dict[str, Any]
     path: Path | None
     tier1: tier1_service.Tier1Result
+
+
+def prepare_target(cfg: Config, report: ProgressReporter) -> dict[str, Any]:
+    """Get the target evidence this run needs, building it if it does not exist.
+
+    Preparation is server-side now (refinements §3): the user supplies an
+    identifier, a chain and a binding mode, and the heavy, biology-literate step
+    happens here rather than on their machine. It is cached on everything that
+    changes what was measured, so a repeat run is free while a changed chain or
+    residue list rebuilds rather than silently reusing the old measurement.
+    """
+    from .tier2 import build as build_mod
+    from .tier2 import bundle as bundle_mod
+
+    explicit = cfg.get("tier2.bundle_path", None)
+    if explicit:
+        return bundle_mod.load(explicit)
+
+    identifier = cfg.get("tier2.target.id", None)
+    if not identifier:
+        raise TargetError(
+            "Tier 2 is enabled but no target is configured. Set tier2.target.id "
+            "and tier2.target.source, or point tier2.bundle_path at a prepared "
+            "target file."
+        )
+
+    mode = cfg.get("tier2.binding_mode")
+    chain = cfg.get("tier2.target.chain", None)
+    signature = build_mod.target_signature(cfg)
+    directory = Path(cfg.get("tier2.bundle_dir"))
+
+    for existing in sorted(directory.glob(f"{identifier.upper()}_*.bundle.json")):
+        try:
+            candidate = bundle_mod.load(existing)
+        except TargetError:
+            continue   # a bundle that fails its own integrity check is not a hit
+        if (
+            candidate.get("target_signature") == signature
+            and bundle_mod.binding_mode(candidate) == mode
+        ):
+            return candidate
+
+    report.warning(
+        f"Preparing {identifier} chain {chain or '(first protein chain)'} for "
+        f"{mode} mode — fetching the structure and measuring it. This happens "
+        f"once per target.",
+        code="target_building",
+    )
+    bundle, _path = build_mod.build_target_bundle(
+        cfg,
+        progress=lambda message: report.warning(message, code="target_progress"),
+    )
+    return bundle
 
 
 def run_pipeline(
@@ -93,15 +147,39 @@ def run_pipeline(
     if cfg.get("tier2.enabled", False):
         from .tier2 import service as tier2_service  # imported lazily: heavy deps
 
+        report.stage_started("target")
+        bundle = prepare_target(cfg, report)
+        report.stage_completed(
+            "target",
+            binding_mode=bundle.get("binding_mode"),
+            bundle_id=bundle.get("bundle_id"),
+        )
+
         report.stage_started("bank")
         tier2_payload = tier2_service.run(
             cfg, tier1, corpus_table, corpus_info,
             progress=report.callback("bank", "controls"),
+            bundle=bundle,
         )
         report.stage_completed("bank", n_evaluated=tier2_payload["n_evaluated"])
-        for warning in (tier2_payload["target"].get("selection_warnings") or []):
+        target_summary = tier2_payload["target"]
+        for warning in (target_summary.get("selection_warnings") or []):
             report.warning(warning, code="pocket_selection")
-        if tier2_payload["target"].get("synthetic"):
+        for warning in (target_summary.get("preparation_warnings") or []):
+            report.warning(warning, code="target_preparation")
+        if target_summary.get("structure_kind") == "predicted":
+            report.warning(
+                "Predicted structure: this target's geometry comes from an "
+                "AlphaFold model, not an experiment."
+                + (
+                    " A predicted model may not show an interface that only forms "
+                    "when a binding partner is present, so surface-mode results "
+                    "here need extra caution."
+                    if tier2_payload.get("binding_mode") == "surface" else ""
+                ),
+                code="predicted_structure",
+            )
+        if target_summary.get("synthetic"):
             report.warning(
                 "Synthetic target evidence: the cavity was fabricated, not "
                 "detected from a real structure.",

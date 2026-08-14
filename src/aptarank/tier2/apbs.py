@@ -1,10 +1,12 @@
-"""Electrostatic compatibility (spec §5.7). Stretch goal, target-level only.
+"""Electrostatics (spec §5.7, refinements §5.2).
 
-RNA carries a uniformly negative backbone charge, so a positively charged
-cavity is more electrostatically hospitable to *any* RNA. Because that depends
-only on the target, it is a single target-level flag — folding it into a
-per-candidate score would add the same constant to every candidate, changing
-no ordering while making the score harder to explain.
+RNA carries a uniformly negative backbone charge, so a positively charged region
+is more electrostatically hospitable to *any* RNA. That is a property of the
+target alone, which has one important consequence: the signal is identical for
+every candidate. It can shift what a score means, but it can never move one
+candidate past another, and it can never change a band. Surface mode therefore
+carries it as a documented target-level term of the composite rather than
+pretending it discriminates between candidates.
 
 Deliberately never allowed to block anything: PDB2PQR routinely struggles with
 metals and non-standard residues, which is precisely the case for the demo
@@ -13,29 +15,76 @@ targets. Any failure is recorded with a reason and the bundle is still valid.
 
 from __future__ import annotations
 
+import math
 import shutil
 import subprocess
+import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 
 from .fpocket import Pocket
 
+#: Points are sampled this far outside the protein atoms, along the outward
+#: radial direction. Sampling at an atom centre reads the potential inside the
+#: low-dielectric interior, which is not what a solvated aptamer approaching the
+#: surface would experience.
+SURFACE_PROBE_OFFSET_A = 3.0
 
-def compute(structure_path: str | Path, pocket: Pocket, work_dir: str | Path) -> dict[str, Any]:
-    """Run PDB2PQR + APBS and sample the grid at the pocket's alpha spheres."""
-    path, work = Path(structure_path), Path(work_dir)
+
+def pdb2pqr_command() -> list[str] | None:
+    """How to invoke PDB2PQR here, preferring the interpreter we are running in.
+
+    `pdb2pqr30` lives in the virtualenv's bin directory, which is only on PATH
+    when the environment has been activated — and the pipeline is deliberately
+    launched by absolute interpreter path, not through an activated shell.
+    """
+    module = subprocess.run(
+        [sys.executable, "-m", "pdb2pqr", "--version"],
+        capture_output=True, text=True, check=False,
+    )
+    if module.returncode == 0:
+        return [sys.executable, "-m", "pdb2pqr"]
+    executable = shutil.which("pdb2pqr30") or shutil.which("pdb2pqr")
+    return [executable] if executable else None
+
+
+def compute(
+    structure_path: str | Path,
+    points: Pocket | Sequence[Sequence[float]],
+    work_dir: str | Path,
+    label: str = "selected_pocket",
+) -> dict[str, Any]:
+    """Run PDB2PQR + APBS and sample the potential grid at the given points.
+
+    `points` may be a Pocket (sampled at its alpha-sphere centres, as in pocket
+    mode) or an explicit array of coordinates (surface mode's patch).
+    """
+    # Both tools run with cwd set to the work directory (APBS writes its grid
+    # relative to cwd), so a relative input path would resolve against the wrong
+    # place and fail with a confusing "file not found" from inside pdb2pqr.
+    path, work = Path(structure_path).resolve(), Path(work_dir).resolve()
     work.mkdir(parents=True, exist_ok=True)
 
-    for tool in ("pdb2pqr30", "apbs"):
-        if shutil.which(tool) is None:
-            return _skipped(f"{tool} not found on PATH")
+    centres = (
+        np.asarray([s.center_A for s in points.alpha_spheres], dtype=float)
+        if isinstance(points, Pocket)
+        else np.asarray(points, dtype=float)
+    )
+    if centres.ndim != 2 or centres.shape[1] != 3 or centres.shape[0] == 0:
+        return _failed(f"no valid sampling points for {label}")
+
+    pdb2pqr = pdb2pqr_command()
+    if pdb2pqr is None:
+        return _skipped("pdb2pqr not found (neither as a module nor on PATH)")
+    if shutil.which("apbs") is None:
+        return _skipped("apbs not found on PATH")
 
     pqr = work / f"{path.stem}.pqr"
     apbs_in = work / f"{path.stem}.in"
     commands = [
-        ["pdb2pqr30", "--ff=AMBER", f"--apbs-input={apbs_in}", str(path), str(pqr)],
+        [*pdb2pqr, "--ff=AMBER", f"--apbs-input={apbs_in}", str(path), str(pqr)],
         ["apbs", str(apbs_in)],
     ]
     executions = []
@@ -59,16 +108,25 @@ def compute(structure_path: str | Path, pocket: Pocket, work_dir: str | Path) ->
 
     try:
         grid = read_opendx(dx_files[0])
-        centres = np.array([s.center_A for s in pocket.alpha_spheres], dtype=float)
         values = sample_grid(grid, centres)
     except Exception as exc:  # noqa: BLE001 - never let this break a bundle
         return _failed(f"could not sample the potential grid: {exc}")
 
     inside = values[np.isfinite(values)]
     if inside.size == 0:
-        return _failed("no alpha-sphere centre fell inside the APBS grid")
+        return _failed(f"no {label} sampling point fell inside the APBS grid")
 
     mean = float(inside.mean())
+    sampling = {
+        "label": label,
+        "n_points_requested": int(centres.shape[0]),
+        "n_points_inside_grid": int(inside.size),
+        "mean_potential_kT_per_e": mean,
+        "median_potential_kT_per_e": float(np.median(inside)),
+        # Positive mean potential = hospitable to a negatively charged backbone.
+        # Target-level: the same for every candidate.
+        "electrostatic_compatible": bool(mean > 0),
+    }
     return {
         "requested": True,
         "status": "success",
@@ -83,15 +141,56 @@ def compute(structure_path: str | Path, pocket: Pocket, work_dir: str | Path) ->
             "counts": [int(v) for v in grid["counts"]],
             "file": dx_files[0].name,
         },
-        "selected_pocket_sampling": {
-            "n_points_requested": int(centres.shape[0]),
-            "n_points_inside_grid": int(inside.size),
-            "mean_potential_kT_per_e": mean,
-            "median_potential_kT_per_e": float(np.median(inside)),
-            # Positive mean potential = hospitable to a negatively charged
-            # backbone. A target-level badge, never part of a candidate score.
-            "electrostatic_compatible": bool(mean > 0),
-        },
+        "sampling": sampling,
+        # Kept under its original name too: v1 bundles and their readers use it.
+        "selected_pocket_sampling": sampling,
+    }
+
+
+def surface_sample_points(
+    patch_coords: Sequence[Sequence[float]],
+    reference_centroid: Sequence[float],
+    offset_A: float = SURFACE_PROBE_OFFSET_A,
+) -> np.ndarray:
+    """Move patch atom positions outward, to where solvent (and RNA) actually is.
+
+    The outward direction is approximated as radially away from the chain's
+    centroid. That is exact for a convex protein and adequate for a patch on the
+    outside of a globular one, which is the only place a surface-mode patch can
+    be. Recorded in the bundle so the approximation is visible.
+    """
+    xyz = np.asarray(patch_coords, dtype=float)
+    centre = np.asarray(reference_centroid, dtype=float)
+    directions = xyz - centre
+    norms = np.linalg.norm(directions, axis=1, keepdims=True)
+    # A point sitting exactly on the centroid has no outward direction; leave it.
+    safe = np.where(norms > 1e-6, norms, 1.0)
+    return xyz + float(offset_A) * (directions / safe)
+
+
+def charge_complementarity(
+    mean_potential_kT_per_e: float | None, scale_kT_per_e: float = 1.0
+) -> dict[str, Any]:
+    """Map a patch potential to a complementarity factor in (0, 1).
+
+        f = 1 / (1 + exp(-phi / scale))
+
+    Negative potential (repels the backbone) tends to 0, positive tends to 1,
+    and a neutral patch sits at exactly 0.5 rather than at a flattering default.
+    A directional signal, never an affinity estimate.
+    """
+    if mean_potential_kT_per_e is None or not math.isfinite(float(mean_potential_kT_per_e)):
+        return {"factor": None, "status": "not_computed",
+                "mean_potential_kT_per_e": None, "scale_kT_per_e": float(scale_kT_per_e)}
+    phi = float(mean_potential_kT_per_e) / float(scale_kT_per_e)
+    # exp overflows for a strongly negative patch; the limit is 0 either way.
+    factor = 1.0 / (1.0 + math.exp(-phi)) if -700 < phi < 700 else (1.0 if phi > 0 else 0.0)
+    return {
+        "factor": factor,
+        "status": "computed",
+        "mean_potential_kT_per_e": float(mean_potential_kT_per_e),
+        "scale_kT_per_e": float(scale_kT_per_e),
+        "hospitable_to_rna": bool(mean_potential_kT_per_e > 0),
     }
 
 

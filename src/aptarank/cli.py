@@ -41,8 +41,25 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("-o", "--output-dir", help="directory for the run artifact")
     run_p.add_argument("--artifact-path", help="exact path to write the artifact to")
     run_p.add_argument("--fast", action="store_true", help="skip shuffled controls and sampling")
-    run_p.add_argument("--target", help="target PDB ID; enables Tier 2")
-    run_p.add_argument("--target-bundle", help="path to a prepared target bundle JSON")
+    run_p.add_argument(
+        "--target", metavar="ID",
+        help="target identifier (PDB ID, or UniProt accession with "
+             "--target-source alphafold); enables Tier 2. The structure is "
+             "fetched and measured server-side.",
+    )
+    run_p.add_argument("--target-source", choices=("pdb", "alphafold"), default=None)
+    run_p.add_argument("--target-chain", help="which chain is the target protein")
+    run_p.add_argument(
+        "--binding-mode", choices=("pocket", "surface"),
+        help="pocket: a loop engages a cavity. surface: the molecule covers a "
+             "surface patch. The expert asserts this; the tool does not infer it.",
+    )
+    run_p.add_argument(
+        "--target-file", metavar="PATH",
+        help="a target description file (target_name/source/id/chain/"
+             "binding_mode/target_site_residues), as in §3.2",
+    )
+    run_p.add_argument("--target-bundle", help="path to an already-prepared target JSON")
     run_p.add_argument(
         "--progress-format", choices=("human", "jsonl"), default="human",
         help="human: carriage-return counters. jsonl: machine-readable events.",
@@ -67,17 +84,23 @@ def build_parser() -> argparse.ArgumentParser:
     build_p.add_argument("--force", action="store_true", help="rebuild even if cached")
     common(build_p)
 
-    target_p = sub.add_parser("target", help="target bundle utilities (Linux only)")
+    target_p = sub.add_parser("target", help="target preparation utilities (Linux only)")
     target_sub = target_p.add_subparsers(dest="target_command", required=True)
     tbuild_p = target_sub.add_parser(
-        "build", help="fetch a structure, run fpocket, write a target bundle"
+        "build", help="fetch a structure, measure it, write a prepared target file"
     )
-    tbuild_p.add_argument("--pdb-id", help="4-character PDB ID, e.g. 3SPU")
+    tbuild_p.add_argument("--id", help="PDB ID (e.g. 7WRQ) or UniProt accession")
+    tbuild_p.add_argument("--source", choices=("pdb", "alphafold"), default=None)
     tbuild_p.add_argument("--chain", help="chain identifier; default is the first protein chain")
-    tbuild_p.add_argument("-o", "--output-dir", dest="bundle_out", help="where to write the bundle")
+    tbuild_p.add_argument("--binding-mode", choices=("pocket", "surface"), default=None)
+    tbuild_p.add_argument(
+        "--target-file", metavar="PATH",
+        help="read the whole target description from a file (§3.2)",
+    )
+    tbuild_p.add_argument("-o", "--output-dir", dest="bundle_out", help="where to write it")
     common(tbuild_p)
 
-    tshow_p = target_sub.add_parser("show", help="summarise a target bundle")
+    tshow_p = target_sub.add_parser("show", help="summarise a prepared target")
     tshow_p.add_argument("path")
 
     eval_p = sub.add_parser("evaluate", help="evaluation experiments E1-E5 (§8)")
@@ -114,6 +137,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _config_from_args(args: argparse.Namespace):
+    from .config import load_target_spec
+
     overrides: dict = {}
     if getattr(args, "corpus", None):
         overrides.setdefault("corpus", {})["path"] = args.corpus
@@ -125,15 +150,64 @@ def _config_from_args(args: argparse.Namespace):
         overrides.setdefault("run", {})["mode"] = "fast"
     if getattr(args, "output_dir", None):
         overrides.setdefault("output", {})["dir"] = args.output_dir
-    if getattr(args, "target", None):
-        overrides.setdefault("tier2", {}).update(
-            {"enabled": True, "target": {"pdb_id": args.target}}
+
+    # A target file first, so explicit flags can still override single fields.
+    if getattr(args, "target_file", None):
+        overrides = _merge(overrides, load_target_spec(args.target_file))
+    if getattr(args, "target", None) or getattr(args, "id", None):
+        overrides = _merge(
+            overrides,
+            {"tier2": {"enabled": True,
+                       "target": {"id": getattr(args, "target", None) or args.id}}},
         )
+    for flag, dotted in (
+        ("target_source", "source"), ("source", "source"),
+        ("target_chain", "chain"), ("chain", "chain"),
+    ):
+        value = getattr(args, flag, None)
+        if value:
+            overrides = _merge(overrides, {"tier2": {"target": {dotted: value}}})
+    if getattr(args, "binding_mode", None):
+        overrides = _merge(overrides, {"tier2": {"binding_mode": args.binding_mode}})
     if getattr(args, "target_bundle", None):
-        overrides.setdefault("tier2", {}).update(
-            {"enabled": True, "bundle_path": args.target_bundle}
+        overrides = _merge(
+            overrides, {"tier2": {"enabled": True, "bundle_path": args.target_bundle}}
         )
+        # An already-prepared target carries the mode it was measured for.
+        # Choosing that target *is* the assertion, so adopt its mode rather than
+        # letting the config default decide — otherwise pointing at a surface
+        # target and saying nothing else fails with "the run asks for pocket",
+        # a mode the user never asked for.
+        #
+        # An explicit --binding-mode still wins, and still has to agree with the
+        # bundle: disagreeing there is a real conflict and is refused downstream.
+        if not getattr(args, "binding_mode", None):
+            declared = _declared_binding_mode(args.target_bundle)
+            if declared:
+                overrides = _merge(overrides, {"tier2": {"binding_mode": declared}})
     return load_config(getattr(args, "config", None), overrides, getattr(args, "sets", []))
+
+
+def _declared_binding_mode(bundle_path: str) -> str | None:
+    """The mode a prepared target says it was measured for, if it can be read.
+
+    Deliberately tolerant: a bundle that cannot be parsed is not diagnosed here
+    but by the pipeline, which validates it properly and produces the error a
+    user can act on.
+    """
+    import json as _json
+
+    try:
+        with open(bundle_path, "r", encoding="utf-8") as handle:
+            return _json.load(handle).get("binding_mode") or None
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def _merge(base: dict, extra: dict) -> dict:
+    from .config import _deep_merge
+
+    return _deep_merge(base, extra)
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -211,9 +285,13 @@ def cmd_target_build(args: argparse.Namespace) -> int:
 
     cfg = _config_from_args(args)
     bundle, path = build_target_bundle(
-        cfg, pdb_id=args.pdb_id, chain_id=args.chain, out_dir=args.bundle_out
+        cfg,
+        identifier=args.id,
+        chain_id=args.chain,
+        out_dir=args.bundle_out,
+        progress=lambda message: print(f"  {message}", file=sys.stderr, flush=True),
     )
-    print(f"\nTarget bundle written: {path}")
+    print(f"\nPrepared target written: {path}")
     print(_format_target(bundle))
     return 0
 
@@ -229,22 +307,49 @@ def _format_target(bundle: dict) -> str:
     from .tier2 import bundle as bundle_mod
 
     s = bundle_mod.summary(bundle)
-    pocket = s["selected_pocket"]
     lines = [
-        f"\n  {s['pdb_id']} chain {s['chain']}   bundle {s['bundle_id'][:12]}",
+        f"\n  {s['identifier']} chain {s['chain']}   target {s['bundle_id'][:12]}",
         f"  name                 {s['name']}",
-        f"  pockets detected     {s['n_pockets']}",
-        f"  selection method     {s['pocket_selection']}",
-        f"  selected pocket      #{pocket['index']}  "
-        f"volume {pocket['volume_A3']:.1f} A^3  fpocket score {pocket['fpocket_score']:.3f}",
-        f"  d_pocket (envelope)  {pocket['d_pocket_A']:.2f} A"
-        f"   (centres {pocket['d_pocket_centres_A']:.2f} A, equiv sphere {pocket['d_equiv_A']:.2f} A)",
-        f"  alpha spheres        {pocket['n_alpha_spheres']}"
-        f"{'   [SHAPE WARNING: oddly shaped cavity]' if pocket['shape_warning'] else ''}",
-        f"  retained hetero      {sorted(set(s['retained_hetero'])) or 'none'}",
-        f"  electrostatics       {s['electrostatics_status']}",
+        f"  binding mode         {s['binding_mode']}",
+        f"  structure            {s['structure_kind']} (from {s['target_source']})",
     ]
-    for warning in s["selection_warnings"]:
+    if s["was_multi_chain"]:
+        lines.append(f"  chains removed       {', '.join(s['chains_removed'])}")
+
+    patch = s.get("patch")
+    if patch:
+        lines += [
+            f"  binding-site patch   {patch['n_residues']} residues, "
+            f"{patch['patch_area_A2']:.0f} A^2 accessible",
+            f"  patch shape          planarity {patch['planarity_A']:.1f} A, "
+            f"elongation {patch['elongation']:.2f}"
+            f"{'   [SHAPE WARNING: not flat]' if patch['shape_warning'] else ''}",
+        ]
+        if patch["buried_residue_numbers"]:
+            lines.append(f"  buried residues      {patch['buried_residue_numbers']}")
+
+    pocket = s.get("selected_pocket")
+    if pocket:
+        lines += [
+            f"  cavities detected    {s['n_pockets']}   (selection: {s['pocket_selection']})",
+            f"  selected cavity      #{pocket['index']}  "
+            f"volume {pocket['volume_A3']:.1f} A^3  fpocket score {pocket['fpocket_score']:.3f}",
+            f"  d_pocket (envelope)  {pocket['d_pocket_A']:.2f} A"
+            f"   (centres {pocket['d_pocket_centres_A']:.2f} A, "
+            f"equiv sphere {pocket['d_equiv_A']:.2f} A)",
+            f"  alpha spheres        {pocket['n_alpha_spheres']}"
+            f"{'   [SHAPE WARNING: oddly shaped cavity]' if pocket['shape_warning'] else ''}",
+        ]
+    elif not patch:
+        lines.append(f"  cavities detected    {s['n_pockets']}")
+
+    lines += [
+        f"  retained hetero      {sorted(set(s['retained_hetero'])) or 'none'}",
+        f"  electrostatics       {s['electrostatics_status']}"
+        + (f"   mean {s['electrostatic_mean_potential']:+.2f} kT/e"
+           if s.get("electrostatic_mean_potential") is not None else ""),
+    ]
+    for warning in [*s["selection_warnings"], *s["preparation_warnings"]]:
         lines.append(f"  !! {warning}")
     return "\n".join(lines)
 

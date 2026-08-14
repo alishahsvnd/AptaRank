@@ -66,15 +66,71 @@ tier1:
     chunk_size: 16
 
 tier2:
-  enabled: false                # flipped on once a target bundle is available
+  enabled: false                # flipped on once a target is configured
   n_candidates: 1000
-  a_per_nt: 6.0
+
+  # Which geometry is compared. The tool does NOT infer this: the expert asserts
+  # how they believe the aptamer engages the target, and the comparison adapts.
+  #
+  #   pocket  : a flexible loop / unpaired region engages a concave cavity
+  #   surface : the molecule covers a flat-ish surface patch (shape + charge)
+  #   groove  : a helical stem lies along an elongated channel — FUTURE WORK,
+  #             described in the paper, deliberately not implemented
+  binding_mode: pocket
+
+  # Physical constants. Coarse by design; each states what it assumes, and
+  # none is ever fitted to the evaluation groups.
+  geometry:
+    a_per_nt_ss: 6.0            # extended single-stranded rise per nucleotide, A
+    a_per_bp_helix: 2.8         # A-form helix rise per base pair, A (groove, future)
+    # Surface-mode footprint: each nucleotide is assumed to cover a square of
+    # side (a_per_nt_ss * footprint_scale), so 1.0 means ~36 A^2 of contact per
+    # nucleotide. An over-estimate for compactly folded candidates — only part
+    # of a folded molecule can touch a surface at once.
+    footprint_scale: 1.0
+
+  # -- pocket mode (Mode A) ------------------------------------------------
   flex_c: 1.0
   sigma_A: 6.0
   # flexible : sqrt-scaling end-to-end proxy (primary; contour length badly
   #            over-penalises long loops)
   # extended : contour length, reported as an upper-bound sensitivity check
   primary_descriptor: flexible
+
+  # -- surface mode (Mode C) -----------------------------------------------
+  surface:
+    # How big a face the candidate presents to the patch.
+    #
+    # radius_of_gyration : size of the folded molecule, from the secondary
+    #                      structure's element graph. Distinguishes an extended
+    #                      helix from a compact junction of the same length.
+    # length             : the cheap proxy — area grows linearly with
+    #                      nucleotide count, so two candidates of equal length
+    #                      are identical whatever they fold into. Kept for
+    #                      comparison and for reproducing earlier runs.
+    footprint_model: radius_of_gyration
+    # Gaussian width on the footprint/patch area mismatch, A^2. Display only:
+    # bands come from the control percentile, never from this number.
+    sigma_A2: 600.0
+    # Whose solvent-accessible area the patch is. `selected_residues` is the
+    # whole configured binding-site residue set; the alternative (the subset
+    # lining a detected pocket) is recorded in the bundle but not yet default.
+    patch_area_definition: selected_residues
+    # RNA is uniformly negative, so a positive patch is hospitable. This is a
+    # TARGET-level property: identical for every candidate, therefore it can
+    # shift the score but can never move one candidate past another or change
+    # a band. Documented in the artifact and the UI.
+    charge:
+      enabled: true
+      # Sets how quickly the complementarity factor saturates: f = 1/(1+exp(-phi/scale)).
+      # 5 kT/e is the rough spread of protein surface potentials, so the factor
+      # stays informative across targets instead of pinning to 0 or 1 on the
+      # first mildly charged patch. Never fitted to a result.
+      scale_kT_per_e: 5.0
+    weights:
+      size_coverage: 1.0
+      charge_complementarity: 1.0
+
   band_percentiles:
     moderate: 0.75
     strong: 0.95
@@ -87,10 +143,22 @@ tier2:
     cache_dir: cache/calibration
 
   target:
-    pdb_id: null
-    chain: null                 # null -> first protein chain
-    active_site_residues: []    # literature-confirmed residue numbers
+    name: null                  # what the biologist calls it, e.g. IGFBP3
+    source: pdb                 # pdb | alphafold
+    id: null                    # PDB ID for source=pdb; UniProt ID for alphafold
+    chain: null                 # null -> first protein chain (alphafold is always A)
+    # Chains of the binding partner in a complex. They are used to locate the
+    # site while the complex is still loaded, and are then stripped so the
+    # surface they covered is exposed for measurement (§3.4).
+    partner_chains: []
+    # Literature-confirmed binding-site residue numbers, in the AUTHOR numbering
+    # of `chain` — plain integers, not K42. Empty falls back to automatic
+    # pocket selection, which the artifact records so the UI can caveat it.
+    target_site_residues: []
     model: 0
+    # Waters always go. Other hetero groups are retained by default because for
+    # enzyme targets they include the functional metal that shapes the cavity.
+    strip_hetatm: false
     hetero_default: retain      # retain | remove
     retain_hetero_resnames: []  # e.g. [ZN] — kept because they shape the cavity
     remove_hetero_resnames: [HOH, DOD, WAT]

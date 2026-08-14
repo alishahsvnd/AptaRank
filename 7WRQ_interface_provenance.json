@@ -1,0 +1,232 @@
+{
+  "tool": "compute_interface_residues.py",
+  "computed_utc": "2026-08-13T05:59:33.972656+00:00",
+  "structure_file": "7WRQ.cif",
+  "target_chain": "B",
+  "partner_chain": "C",
+  "cutoff_A": 4.5,
+  "definition": "target chain 'B' residues with any atom within 4.5 A of any atom of partner chain 'C'",
+  "n_interface_residues": 31,
+  "target_site_residues": [
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    38,
+    40,
+    55,
+    56,
+    57,
+    75,
+    76,
+    77,
+    78,
+    80,
+    81,
+    187,
+    190,
+    194,
+    205,
+    210,
+    211,
+    212,
+    213,
+    214,
+    215,
+    224,
+    225,
+    226,
+    227
+  ],
+  "residue_detail": [
+    {
+      "resseq": 7,
+      "icode": "",
+      "resname": "LEU",
+      "min_dist_A": 3.73
+    },
+    {
+      "resseq": 8,
+      "icode": "",
+      "resname": "GLY",
+      "min_dist_A": 4.34
+    },
+    {
+      "resseq": 9,
+      "icode": "",
+      "resname": "PRO",
+      "min_dist_A": 3.09
+    },
+    {
+      "resseq": 10,
+      "icode": "",
+      "resname": "VAL",
+      "min_dist_A": 3.69
+    },
+    {
+      "resseq": 11,
+      "icode": "",
+      "resname": "VAL",
+      "min_dist_A": 3.13
+    },
+    {
+      "resseq": 12,
+      "icode": "",
+      "resname": "ARG",
+      "min_dist_A": 4.27
+    },
+    {
+      "resseq": 38,
+      "icode": "",
+      "resname": "PRO",
+      "min_dist_A": 4.27
+    },
+    {
+      "resseq": 40,
+      "icode": "",
+      "resname": "CYS",
+      "min_dist_A": 4.22
+    },
+    {
+      "resseq": 55,
+      "icode": "",
+      "resname": "GLY",
+      "min_dist_A": 4.03
+    },
+    {
+      "resseq": 56,
+      "icode": "",
+      "resname": "ILE",
+      "min_dist_A": 4.47
+    },
+    {
+      "resseq": 57,
+      "icode": "",
+      "resname": "TYR",
+      "min_dist_A": 2.86
+    },
+    {
+      "resseq": 75,
+      "icode": "",
+      "resname": "ARG",
+      "min_dist_A": 4.36
+    },
+    {
+      "resseq": 76,
+      "icode": "",
+      "resname": "PRO",
+      "min_dist_A": 3.56
+    },
+    {
+      "resseq": 77,
+      "icode": "",
+      "resname": "LEU",
+      "min_dist_A": 3.64
+    },
+    {
+      "resseq": 78,
+      "icode": "",
+      "resname": "GLN",
+      "min_dist_A": 4.44
+    },
+    {
+      "resseq": 80,
+      "icode": "",
+      "resname": "LEU",
+      "min_dist_A": 4.43
+    },
+    {
+      "resseq": 81,
+      "icode": "",
+      "resname": "LEU",
+      "min_dist_A": 3.98
+    },
+    {
+      "resseq": 187,
+      "icode": "",
+      "resname": "ARG",
+      "min_dist_A": 4.22
+    },
+    {
+      "resseq": 190,
+      "icode": "",
+      "resname": "MET",
+      "min_dist_A": 4.03
+    },
+    {
+      "resseq": 194,
+      "icode": "",
+      "resname": "LEU",
+      "min_dist_A": 4.02
+    },
+    {
+      "resseq": 205,
+      "icode": "",
+      "resname": "PRO",
+      "min_dist_A": 3.3
+    },
+    {
+      "resseq": 210,
+      "icode": "",
+      "resname": "ILE",
+      "min_dist_A": 3.26
+    },
+    {
+      "resseq": 211,
+      "icode": "",
+      "resname": "PRO",
+      "min_dist_A": 3.36
+    },
+    {
+      "resseq": 212,
+      "icode": "",
+      "resname": "ASN",
+      "min_dist_A": 3.08
+    },
+    {
+      "resseq": 213,
+      "icode": "",
+      "resname": "CYS",
+      "min_dist_A": 4.19
+    },
+    {
+      "resseq": 214,
+      "icode": "",
+      "resname": "ASP",
+      "min_dist_A": 3.68
+    },
+    {
+      "resseq": 215,
+      "icode": "",
+      "resname": "LYS",
+      "min_dist_A": 4.02
+    },
+    {
+      "resseq": 224,
+      "icode": "",
+      "resname": "CYS",
+      "min_dist_A": 4.41
+    },
+    {
+      "resseq": 225,
+      "icode": "",
+      "resname": "ARG",
+      "min_dist_A": 4.02
+    },
+    {
+      "resseq": 226,
+      "icode": "",
+      "resname": "PRO",
+      "min_dist_A": 4.12
+    },
+    {
+      "resseq": 227,
+      "icode": "",
+      "resname": "SER",
+      "min_dist_A": 3.55
+    }
+  ],
+  "insertion_codes_present": false
+}

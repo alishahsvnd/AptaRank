@@ -139,3 +139,99 @@ def test_excluded_rows_are_surfaced_as_a_warning(tmp_path):
     )
     assert verdict["can_run"]
     assert any("10 of 100" in w for w in verdict["warnings"])
+
+
+# -- the pre-run eligibility verdict (refinements §1.5) ------------------
+
+
+def test_an_unverified_library_is_called_development_before_the_run(tmp_path):
+    """The bug this fixes: the New Analysis page promised publication-eligible
+    for a library with no provenance record, and the Results page then said
+    otherwise. The pre-run verdict must be the one the artifact will carry."""
+    library = inspect_library(write_corpus(tmp_path / "validated.csv"))
+    assert library.state == UNVERIFIED
+
+    verdict = review(ok_validation(), library, None, preset="standard")
+    assert verdict["expected_status"] == "Development only"
+    assert verdict["development"] is True
+    assert "unverified_corpus_provenance" in verdict["development_reasons"]
+
+
+def test_the_pre_run_verdict_matches_what_the_artifact_will_say(tmp_path):
+    """Same rule, same reason codes, evaluated before and after the run."""
+    from aptarank.tier1.corpus import CorpusInfo
+    from dashboard.inputs import eligibility
+
+    for manifest, expected in (
+        (None, ["unverified_corpus_provenance"]),
+        ({"source": "s", "curator": "c", "curated_date": "d"}, []),
+    ):
+        path = write_corpus(tmp_path / f"lib_{bool(manifest)}.csv")
+        if manifest:
+            path.with_suffix(".manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+        library = inspect_library(path)
+        before = eligibility(library, None)
+
+        info = CorpusInfo(
+            corpus_id="c", path=str(path), corpus_sha256="a", cache_sha256="b",
+            n_sequences=200, n_dropped=0, feature_schema_version="1",
+            tool_signature="t", is_placeholder=False, provenance=manifest or {},
+        )
+        after_eligible = info.publication_eligible
+        assert before["publication_eligible"] == after_eligible
+        assert before["development_reasons"] == expected
+
+
+def test_a_synthetic_target_is_development_before_the_run():
+    from dashboard.inputs import TargetEvidence, TargetRequest, eligibility
+    from pathlib import Path
+
+    fake = TargetEvidence(path=Path("x"), pdb_id="DEMO", chain="A", synthetic=True)
+    request = TargetRequest(kind="prepared", prepared=fake, label="DEMO")
+    verdict = eligibility(None, request)
+    assert "synthetic_target_bundle" in verdict["development_reasons"]
+
+
+# -- target requests (refinements §3) ------------------------------------
+
+
+def test_a_target_description_becomes_a_runnable_request():
+    from dashboard.inputs import build_target_request
+
+    request = build_target_request(
+        "spec", spec_text="id: 7WRQ\nchain: B\nbinding_mode: pocket"
+    )
+    assert request.usable
+    assert request.binding_mode == "pocket"
+    assert request.spec["tier2"]["target"]["id"] == "7WRQ"
+    assert not request.is_predicted
+
+
+def test_surface_mode_without_residues_is_refused_up_front():
+    from dashboard.inputs import build_target_request
+
+    request = build_target_request("spec", spec_text="id: 7WRQ\nbinding_mode: surface")
+    assert not request.usable
+    assert "binding-site residues" in request.problem
+
+
+def test_a_predicted_structure_is_flagged_before_the_run():
+    from dashboard.inputs import build_target_request
+
+    request = build_target_request(
+        "spec",
+        spec_text="id: P17936\nsource: alphafold\nchain: A\nbinding_mode: pocket",
+    )
+    assert request.is_predicted
+    verdict = review(ok_validation(), None, request, preset="standard")
+    assert any("Predicted structure" in w for w in verdict["warnings"])
+
+
+def test_an_unpreparable_target_description_refuses_the_run():
+    from dashboard.inputs import build_target_request
+
+    request = build_target_request("spec", spec_text="chain: B")
+    verdict = review(ok_validation(), None, request, preset="standard")
+    assert not verdict["can_run"]
