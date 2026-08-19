@@ -23,7 +23,7 @@ def pocket(index, score, residues, druggability=0.5, volume=100.0, spheres=10):
 ALL_RESIDUES = [Residue("A", n, "") for n in range(1, 400)]
 
 
-def test_active_site_overlap_beats_a_higher_fpocket_score():
+def test_target_site_overlap_beats_a_higher_fpocket_score():
     """The functional cavity is not always fpocket's top-scoring one."""
     pockets = [pocket(1, 0.90, [10, 11, 12]), pocket(2, 0.30, [120, 124, 208])]
     result = selection.select_pocket(
@@ -32,7 +32,7 @@ def test_active_site_overlap_beats_a_higher_fpocket_score():
         structure_residues=ALL_RESIDUES,
     )
     assert result["selected_pocket_index"] == 2
-    assert result["method"] == "active_site_overlap"
+    assert result["method"] == "target_site_overlap"
     assert [e["overlap_count"] for e in result["pocket_evidence"]] == [0, 3]
 
 
@@ -65,9 +65,9 @@ def test_zero_overlap_fallback_is_explicit_and_loudly_labelled():
         structure_residues=ALL_RESIDUES,
         allow_zero_overlap_fallback=True,
     )
-    assert result["method"] == "active_site_zero_overlap_fallback"
+    assert result["method"] == "target_site_zero_overlap_fallback"
     assert result["selected_pocket_index"] == 1
-    assert any("must NOT be described as active-site" in w for w in result["warnings"])
+    assert any("must NOT be described as binding-site" in w for w in result["warnings"])
 
 
 def test_residue_absent_from_the_structure_is_caught_before_selection():
@@ -93,3 +93,19 @@ def test_residue_specs_accept_numbers_and_explicit_chains():
         [120, "124", {"chain_id": "B", "residue_number": 208, "insertion_code": "A"}], "A"
     )
     assert [s.key() for s in specs] == [("A", 120, ""), ("A", 124, ""), ("B", 208, "A")]
+
+
+def test_overlapping_residues_are_recorded_in_a_stable_order():
+    """Set iteration order varies between processes (randomised hashing).
+
+    The residues would be identical but the recorded evidence would not, and
+    anything hashing the bundle would call two identical builds different.
+    """
+    pockets = [pocket(1, 0.9, [225, 12, 210, 40, 187])]
+    result = selection.select_pocket(
+        pockets,
+        requested=selection.parse_residue_specs([12, 40, 187, 210, 225], "A"),
+        structure_residues=[Residue("A", r, "", "ALA") for r in (12, 40, 187, 210, 225)],
+    )
+    numbers = [r["residue_number"] for r in result["pocket_evidence"][0]["overlapping_residues"]]
+    assert numbers == sorted(numbers)

@@ -12,6 +12,12 @@ runs/
 cache/
 logs/
 uploads/
+# APBS writes an I/O capture log wherever it runs
+io.mc
+
+# Written by deploy/server_install.sh, per machine, with absolute paths into
+# that host's data directory. Edit the deploy script, not this file.
+configs/server.yaml
 data/corpus/
 data/*.local.*
 !data/demo_candidates.csv

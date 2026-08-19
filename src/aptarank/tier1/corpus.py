@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -26,7 +26,7 @@ import pandas as pd
 from ..config import CRITERIA, Config
 from ..errors import CorpusError
 from ..ingest import normalise_sequence, validate_sequence
-from ..provenance import sha256_file, sha256_text, tool_versions
+from ..provenance import original_filename, sha256_file, sha256_text, tool_versions
 from . import features as feature_mod
 from . import folding
 from .scoring import ReferenceDistributions
@@ -68,6 +68,8 @@ class CorpusInfo:
     is_placeholder: bool
     dropped_reasons: dict[str, int] = field(default_factory=dict)
     provenance: dict[str, Any] = field(default_factory=dict)
+    #: What the user called this library, when it arrived as an upload.
+    original_filename: str | None = None
 
     @property
     def provenance_verified(self) -> bool:
@@ -98,24 +100,67 @@ class CorpusInfo:
             "provenance": self.provenance,
             "provenance_verified": self.provenance_verified,
             "publication_eligible": self.publication_eligible,
+            "original_filename": self.original_filename or Path(self.path).name,
         }
 
 
-def tool_signature() -> str:
+def tool_signature(geometry: Mapping[str, float] | None = None) -> str:
     """Hash of everything that determines the corpus feature values.
 
     Tool versions alone are not enough: a change to the folding model
     (temperature, dangles, noLP, ...) changes every number in the cache while
     leaving the version strings identical. A cache that survived that would be
-    a silent methodological error, so the model settings are in the key.
+    a silent methodological error, so the model settings are in the key — and so
+    are the nucleic-acid lengths, which set the cached radius of gyration.
     """
     versions = tool_versions()
     relevant = {
         "tools": {k: versions.get(k) for k in ("viennarna", "forgi")},
         "model": folding.model_settings(),
         "features": list(feature_mod.FEATURE_COLUMNS),
+        "geometry": dict(geometry or {}),
     }
     return sha256_text(json.dumps(relevant, sort_keys=True, default=str))[:12]
+
+
+#: Enough digits to round-trip a float64 exactly. pandas' default formatting is
+#: not round-trip safe for every value, and a one-ULP difference is not harmless
+#: here: `empirical_cdf` counts exact ties with a mid-rank, and `mfe_norm` is
+#: `mfe / length` — a ratio of a two-decimal energy to a small integer, so the
+#: same value recurs hundreds of times across a corpus. Nudging those off the
+#: tie moved a candidate's criterion score by up to 0.008.
+FLOAT_FORMAT = "%.17g"
+
+#: Identifier columns stay strings. Left to infer, a library whose ids are
+#: 1, 2, 3 comes back as int64 from the cache but str from a fresh build, which
+#: changes the per-control seeds derived from those ids.
+ID_COLUMNS = ("candidate_id", "id")
+
+
+def write_feature_cache(table: pd.DataFrame, path: Path) -> None:
+    """Write a feature matrix so that reading it back returns the same numbers."""
+    table.to_csv(path, index=False, float_format=FLOAT_FORMAT)
+
+
+def read_feature_cache(path: Path) -> pd.DataFrame:
+    """Read a feature matrix back exactly, keeping identifiers as identifiers.
+
+    `float_precision="round_trip"` is not optional. pandas' default C parser
+    trades correctness of the last bit for speed, so without it a value written
+    with full precision still comes back one ULP out — which is the whole bug
+    this pair of functions exists to close.
+    """
+    header = pd.read_csv(path, nrows=0)
+    dtypes = {c: str for c in ID_COLUMNS if c in header.columns}
+    return pd.read_csv(path, dtype=dtypes, float_precision="round_trip")
+
+
+def geometry_settings(cfg: Config) -> dict[str, float]:
+    """The nucleic-acid lengths the feature layer needs, from the config."""
+    return {
+        "a_per_bp_helix": float(cfg.get("tier2.geometry.a_per_bp_helix")),
+        "a_per_nt_ss": float(cfg.get("tier2.geometry.a_per_nt_ss")),
+    }
 
 
 def load_corpus_table(path: str | Path, min_length: int, max_length: int) -> tuple[pd.DataFrame, dict[str, int]]:
@@ -180,7 +225,8 @@ def build_or_load(
 
     min_len, max_len = cfg.get("input.min_length"), cfg.get("input.max_length")
     corpus_sha = sha256_file(path)
-    signature = tool_signature()
+    geometry = geometry_settings(cfg)
+    signature = tool_signature(geometry)
     key = f"{Path(path).stem}_{corpus_sha[:12]}_{FEATURE_SCHEMA_VERSION}_{signature}_{min_len}-{max_len}"
 
     cache_dir = Path(cfg.get("corpus.cache_dir"))
@@ -188,13 +234,14 @@ def build_or_load(
     cache_meta = cache_dir / f"{key}.meta.json"
 
     if cache_csv.exists() and cache_meta.exists() and not force:
-        table = pd.read_csv(cache_csv)
+        table = read_feature_cache(cache_csv)
         meta = json.loads(cache_meta.read_text(encoding="utf-8"))
         meta["is_placeholder"] = is_placeholder
         meta["path"] = str(path)
         # Re-read the manifest rather than trusting the cache: adding
         # provenance to a library must take effect without a rebuild.
         meta["provenance"] = read_manifest(path)
+        meta["original_filename"] = original_filename(path)
         meta.pop("provenance_verified", None)
         meta.pop("publication_eligible", None)
         return table, CorpusInfo(**meta)
@@ -207,6 +254,8 @@ def build_or_load(
             n_ensemble_samples=0,   # the corpus defines reference distributions
             n_shuffles=0,           # only; it needs neither sampling nor controls
             seed=int(cfg.get("run.seed")),
+            a_per_bp_helix=geometry["a_per_bp_helix"],
+            a_per_nt_ss=geometry["a_per_nt_ss"],
         )
         for row in clean.itertuples()
     ]
@@ -230,7 +279,12 @@ def build_or_load(
     )
 
     cache_dir.mkdir(parents=True, exist_ok=True)
-    table.to_csv(cache_csv, index=False)
+    write_feature_cache(table, cache_csv)
+    # Score against the cache we just wrote, not the frame we just computed.
+    # See `write_feature_cache`: the two are not bit-identical, and a percentile
+    # is tie-sensitive, so the first run against a library would otherwise score
+    # differently from every later run against the same library.
+    table = read_feature_cache(cache_csv)
     info = CorpusInfo(
         corpus_id=key,
         path=str(path),
@@ -243,6 +297,7 @@ def build_or_load(
         tool_signature=signature,
         is_placeholder=is_placeholder,
         provenance=read_manifest(path),
+        original_filename=original_filename(path),
     )
     payload = info.to_dict()
     payload.pop("publication_eligible")

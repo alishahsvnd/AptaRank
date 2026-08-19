@@ -283,9 +283,12 @@ def _coerce(value: str) -> float | str:
 
 
 def _version(executable: str) -> str | None:
-    try:
-        proc = subprocess.run([executable, "--version"], capture_output=True, text=True, timeout=15)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    output = (proc.stdout or proc.stderr).strip()
-    return output.splitlines()[0] if output else None
+    """The version fpocket reports, via the one parser that knows its quirks.
+
+    This string goes inside the bundle id, so "which fpocket produced these
+    numbers" has to be the actual answer rather than the first line the tool
+    happened to print.
+    """
+    from ..provenance import _cli_version
+
+    return _cli_version([executable, "--version"])

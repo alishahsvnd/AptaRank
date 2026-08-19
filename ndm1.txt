@@ -1,0 +1,16 @@
+# NDM-1 — the Mode A (pocket) demo target.
+#
+# No target_site_residues: the zinc-coordinating residues are still to be
+# confirmed, and guessing them would point the tool at the wrong site while
+# looking exactly as confident as a correct list. Left empty, the cavity is
+# chosen automatically and the artifact records that, so the UI caveats it.
+# Add the confirmed integers here to turn this into a binding-site-selected
+# target.
+target_name: NDM-1
+source: pdb
+id: 3SPU
+chain: A
+binding_mode: pocket
+# The catalytic zinc shapes the cavity being measured, so it stays.
+strip_hetatm: false
+retain_hetero_resnames: ["ZN"]

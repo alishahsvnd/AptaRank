@@ -70,6 +70,20 @@ def _flatten(rec: Mapping[str, Any]) -> dict[str, Any]:
         flat["hairpin_phrase"] = f"{n_hairpins} hairpin loop" + ("s" if n_hairpins != 1 else "")
     flat.update({f"shuffle_{k}": v for k, v in shuffle.items()})
     flat.update({f"tier2_{k}": v for k, v in tier2.items()})
+    flat["binding_mode"] = tier2.get("binding_mode")
+    potential = tier2.get("patch_mean_potential_kT_per_e")
+    if potential is not None:
+        flat["charge_word"] = "hospitable to" if float(potential) > 0 else "repulsive to"
+    # Surface mode's opening clause names whichever quantity the configured
+    # footprint model actually used, so no sentence quotes a number that did not
+    # go into the comparison.
+    if tier2.get("radius_of_gyration_A") is not None:
+        flat["footprint_phrase"] = (
+            f"Folded, the candidate is about "
+            f"{float(tier2['radius_of_gyration_A']):.0f} Å across and"
+        )
+    elif tier2.get("footprint_nt") is not None:
+        flat["footprint_phrase"] = f"At {float(tier2['footprint_nt']):.0f} nt the candidate"
     return flat
 
 
@@ -119,10 +133,18 @@ RULES: tuple[Rule, ...] = (
     ),
     Rule(
         "tier2_weak", CAUTION, 60,
-        lambda r: r.get("band") == "weak",
+        lambda r: r.get("band") == "weak" and r.get("binding_mode") != "surface",
         "Largest accessible loop spans approximately {tier2_d_apt_A:.0f} Å, a poor "
         "geometric match to the {tier2_d_pocket_A:.1f} Å cavity detected on the target.",
         chip="geometry: weak",
+    ),
+    Rule(
+        "surface_weak", CAUTION, 61,
+        lambda r: r.get("band") == "weak" and r.get("binding_mode") == "surface",
+        "{footprint_phrase} would cover roughly "
+        "{tier2_footprint_area_A2:.0f} Å², a poor match to the "
+        "{tier2_patch_area_A2:.0f} Å² binding site measured on the target.",
+        chip="size: weak match",
     ),
 
     # -- positives --------------------------------------------------------
@@ -135,10 +157,18 @@ RULES: tuple[Rule, ...] = (
     ),
     Rule(
         "tier2_strong", POSITIVE, 120,
-        lambda r: r.get("band") == "strong",
+        lambda r: r.get("band") == "strong" and r.get("binding_mode") != "surface",
         "Largest accessible loop spans approximately {tier2_d_apt_A:.0f} Å, compatible "
         "with the {tier2_d_pocket_A:.1f} Å cavity detected on the target.",
         chip="geometry: strong",
+    ),
+    Rule(
+        "surface_strong", POSITIVE, 121,
+        lambda r: r.get("band") == "strong" and r.get("binding_mode") == "surface",
+        "{footprint_phrase} would cover roughly "
+        "{tier2_footprint_area_A2:.0f} Å², a close match to the "
+        "{tier2_patch_area_A2:.0f} Å² binding site measured on the target.",
+        chip="size: strong match",
     ),
     Rule(
         "shuffle_pass", POSITIVE, 130,
@@ -172,11 +202,32 @@ RULES: tuple[Rule, ...] = (
     ),
     Rule(
         "tier2_moderate", NEUTRAL, 170,
-        lambda r: r.get("band") == "moderate",
+        lambda r: r.get("band") == "moderate" and r.get("binding_mode") != "surface",
         "Largest accessible loop spans approximately {tier2_d_apt_A:.0f} Å against a "
         "{tier2_d_pocket_A:.1f} Å cavity — a moderate geometric match relative to "
         "shuffled controls.",
         chip="geometry: moderate",
+    ),
+    Rule(
+        "surface_moderate", NEUTRAL, 171,
+        lambda r: r.get("band") == "moderate" and r.get("binding_mode") == "surface",
+        "{footprint_phrase} would cover roughly "
+        "{tier2_footprint_area_A2:.0f} Å² against a {tier2_patch_area_A2:.0f} Å² "
+        "binding site — a moderate size match relative to shuffled controls.",
+        chip="size: moderate match",
+    ),
+    Rule(
+        # The charge term is the same for every candidate against this target,
+        # so it is reported as a property of the site and never as something
+        # this candidate did well.
+        "surface_charge", NEUTRAL, 180,
+        lambda r: r.get("binding_mode") == "surface"
+        and _has(r, "tier2_patch_mean_potential_kT_per_e"),
+        "The binding site itself carries a mean potential of "
+        "{tier2_patch_mean_potential_kT_per_e:+.1f} kT/e, which is "
+        "{charge_word} a negatively charged RNA backbone — a property of the "
+        "target, identical for every candidate here.",
+        chip="site charge",
     ),
 
     # -- neutral / bookkeeping -------------------------------------------

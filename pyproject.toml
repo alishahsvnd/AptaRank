@@ -14,6 +14,9 @@ dependencies = [
     "forgi>=2.2.3",
     "ushuffle>=1.1.2",
     "biopython>=1.81",
+    # Solvent-accessible surface area, for surface-mode binding sites. Pure
+    # computation, no external tools, wheels on every platform.
+    "freesasa>=2.2",
     "numpy>=1.23",
     "scipy>=1.9",
     "pandas>=2.0",
@@ -23,6 +26,10 @@ dependencies = [
 [project.optional-dependencies]
 dashboard = ["streamlit>=1.36", "altair>=5.0"]
 dev = ["pytest>=7.4", "jsonschema>=4.0"]
+# Surface-mode charge complementarity. APBS itself is a separate binary (see
+# deploy/server_install.sh); without either, surface mode still scores on size
+# and records the charge term as "not computed".
+electrostatics = ["pdb2pqr>=3.6"]
 
 [project.scripts]
 aptarank = "aptarank.cli:main"

@@ -18,6 +18,7 @@ from typing import Any, Iterator
 import pandas as pd
 
 from .errors import InputError
+from .provenance import original_filename
 
 RNA_ALPHABET = frozenset("ACGU")
 _WHITESPACE = re.compile(r"\s+")
@@ -40,6 +41,9 @@ class IngestResult:
     rejections: list[dict[str, Any]] = field(default_factory=list)
     n_submitted: int = 0
     filename: str | None = None
+    #: What the user called the file. Uploads are stored under a content hash,
+    #: so without this the provenance panel would show a name nobody recognises.
+    original_filename: str | None = None
 
     @property
     def n_valid(self) -> int:
@@ -52,6 +56,9 @@ class IngestResult:
     def summary(self) -> dict[str, Any]:
         return {
             "filename": self.filename,
+            "original_filename": self.original_filename or (
+                Path(self.filename).name if self.filename else None
+            ),
             "n_submitted": self.n_submitted,
             "n_valid": self.n_valid,
             "n_rejected": self.n_rejected,
@@ -166,6 +173,7 @@ def ingest(
         rejections=rejections,
         n_submitted=len(records),
         filename=str(path),
+        original_filename=original_filename(path),
     )
 
 

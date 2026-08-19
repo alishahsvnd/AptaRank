@@ -22,7 +22,7 @@ from ..tier1 import scoring, shuffles
 from ..tier1.corpus import CorpusInfo
 from ..tier1.scoring import ReferenceDistributions
 from ..tier2 import bundle as bundle_mod
-from ..tier2 import calibration
+from ..tier2 import calibration, modes
 from . import groups as groups_mod
 from . import stats
 from .groups import ComparisonGroups, target_folds
@@ -51,6 +51,8 @@ def score_sequences(
             n_shuffles=n_shuffles,
             shuffle_k=int(cfg.get("tier1.shuffle.k")),
             seed=seed,
+            a_per_bp_helix=float(cfg.get("tier2.geometry.a_per_bp_helix")),
+            a_per_nt_ss=float(cfg.get("tier2.geometry.a_per_nt_ss")),
         )
         for row in frame.itertuples()
     ]
@@ -304,17 +306,26 @@ def e3_matched_vs_decoy(
     Pooling raw scores into one AUROC would be invalid.
     """
     started = time.perf_counter()
-    a_per_nt = float(cfg.get("tier2.a_per_nt"))
-    flex_c = float(cfg.get("tier2.flex_c"))
-    sigma = float(cfg.get("tier2.sigma_A"))
     rng = np.random.default_rng(int(cfg.get("run.seed")))
 
+    # E3 compares each aptamer against its true target and against decoys, so
+    # every target must be measured the same way: one binding mode across the
+    # whole experiment, taken from the config.
+    mode = modes.check_mode(cfg.get("tier2.binding_mode"))
+    params = modes.parameters(cfg, mode)
+
     distributions = {}
-    for pdb_id, bundle in bundles.items():
-        d_pocket = float(bundle_mod.selected_pocket(bundle)["geometry"]["d_pocket_A"])
-        distributions[pdb_id] = (
-            d_pocket,
-            calibration.target_distribution(bank, d_pocket, a_per_nt, flex_c, sigma),
+    for identifier, bundle in bundles.items():
+        built_for = bundle_mod.binding_mode(bundle)
+        if built_for != mode:
+            raise CorpusError(
+                f"target {identifier} was prepared for {built_for!r} mode but E3 is "
+                f"running in {mode!r}; raw scores are not comparable across modes"
+            )
+        target = modes.target_measurement(bundle, mode)
+        distributions[identifier] = (
+            target,
+            calibration.target_distribution(bank, mode, target, params),
         )
 
     available = sorted(distributions)
@@ -324,20 +335,21 @@ def e3_matched_vs_decoy(
             "reason": f"need at least two target bundles, have {len(available)}",
         }
 
+    column = modes.descriptor_column(mode, params)
     pairs, positives, negatives, true_scores, decoy_scores = [], [], [], [], []
     for row in scored_validated.itertuples():
         true_target = str(getattr(row, "target_pdb_id", "") or "").upper()
         if true_target not in distributions:
             continue
-        loop = float(row.loop_nt_median)
-        if not np.isfinite(loop) or loop <= 0:
+        value = float(getattr(row, column, float("nan")))
+        if not modes.is_evaluable(value):
             continue
 
         decoy_pool = [t for t in available if t != true_target]
         chosen = list(rng.choice(decoy_pool, size=min(n_decoys, len(decoy_pool)), replace=False))
 
-        true_p = _percentile_for(loop, distributions[true_target], a_per_nt, flex_c)
-        decoys = [_percentile_for(loop, distributions[t], a_per_nt, flex_c) for t in chosen]
+        true_p = _percentile_for(value, distributions[true_target], mode, params)
+        decoys = [_percentile_for(value, distributions[t], mode, params) for t in chosen]
 
         pairs.append(
             {"candidate_id": row.candidate_id, "true_target": true_target,
@@ -376,12 +388,10 @@ def e3_matched_vs_decoy(
     }
 
 
-def _percentile_for(loop_nt: float, entry, a_per_nt: float, flex_c: float) -> float:
-    from ..tier2.geometry import aptamer_dimensions
-
-    d_pocket, dist = entry
-    d_apt = aptamer_dimensions(loop_nt, a_per_nt, flex_c)["flexible"]
-    return float(dist.percentile(abs(d_apt - d_pocket))[0])
+def _percentile_for(value: float, entry, mode: str, params: Mapping[str, Any]) -> float:
+    target, dist = entry
+    result = modes.compare(mode, value, target, params)
+    return float(dist.percentile(result["disagreement"])[0])
 
 
 # -- E4 ------------------------------------------------------------------
@@ -412,7 +422,10 @@ def e4_target_swappability(artifacts: Sequence[Mapping[str, Any]]) -> dict[str, 
         }
         by_target[target["pdb_id"]] = {
             "run_id": artifact["run_id"],
-            "d_pocket_A": target["selected_pocket"]["d_pocket_A"],
+            "binding_mode": artifact.get("binding_mode") or target.get("binding_mode"),
+            # The dimension the mode actually compared, so two targets are only
+            # ever contrasted on the quantity that drove their scores.
+            "target_dimension": _target_dimension(target),
             "synthetic": target.get("synthetic", False),
             "scores": scores,
             "bands": bands,
@@ -438,7 +451,10 @@ def e4_target_swappability(artifacts: Sequence[Mapping[str, Any]]) -> dict[str, 
             comparisons.append(
                 {
                     "targets": [a, b],
-                    "d_pocket_A": [by_target[a]["d_pocket_A"], by_target[b]["d_pocket_A"]],
+                    "binding_modes": [by_target[a]["binding_mode"], by_target[b]["binding_mode"]],
+                    "target_dimensions": [
+                        by_target[a]["target_dimension"], by_target[b]["target_dimension"]
+                    ],
                     "n_shared_candidates": len(shared),
                     "band_changed_fraction": changed / len(shared),
                     "spearman_rho": float(rho.statistic),
@@ -451,15 +467,27 @@ def e4_target_swappability(artifacts: Sequence[Mapping[str, Any]]) -> dict[str, 
         "status": "complete",
         "title": "Target swappability",
         "targets": {
-            k: {"d_pocket_A": v["d_pocket_A"], "run_id": v["run_id"],
-                "synthetic": v["synthetic"], "n_evaluated": len(v["scores"])}
+            k: {"target_dimension": v["target_dimension"], "run_id": v["run_id"],
+                "binding_mode": v["binding_mode"], "synthetic": v["synthetic"],
+                "n_evaluated": len(v["scores"])}
             for k, v in by_target.items()
         },
         "comparisons": comparisons,
         "note": "Similar results are not necessarily a software failure: two "
-                "targets with similar cavity dimensions should produce similar "
-                "geometric annotations. Compare d_pocket_A before concluding.",
+                "targets with similar dimensions should produce similar geometric "
+                "annotations. Compare target_dimension before concluding. Two "
+                "targets scored in different binding modes are not comparable at "
+                "all — their scores answer different questions.",
     }
+
+
+def _target_dimension(target: Mapping[str, Any]) -> dict[str, Any]:
+    """The measurement a target's mode compared, named with its units."""
+    patch = target.get("patch")
+    if patch and patch.get("patch_area_A2"):
+        return {"name": "patch_area_A2", "value": patch["patch_area_A2"], "units": "A^2"}
+    pocket = target.get("selected_pocket") or {}
+    return {"name": "d_pocket_A", "value": pocket.get("d_pocket_A"), "units": "A"}
 
 
 # -- E5 ------------------------------------------------------------------

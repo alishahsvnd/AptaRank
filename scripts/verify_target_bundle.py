@@ -12,6 +12,7 @@ scientific payload is stable.
 from __future__ import annotations
 
 import argparse
+import glob
 import sys
 from pathlib import Path
 
@@ -24,11 +25,18 @@ TOLERANCE = 1e-6
 def verify(path: Path, rebuild: bool = False) -> list[str]:
     problems: list[str] = []
     bundle = bundle_mod.load(path)          # also re-checks the bundle id
+    mode = bundle_mod.binding_mode(bundle)
+    target = bundle["target"]
     print(f"  bundle_id       {bundle['bundle_id']}")
-    print(f"  target          {bundle['target']['pdb_id']} chain {bundle['target']['chain_id']}")
+    print(f"  target          {target['pdb_id']} chain {target['chain_id']}")
+    print(f"  binding mode    {mode}")
+    print(f"  structure       {target.get('structure_kind', 'experimental')} "
+          f"(from {target.get('target_source', 'pdb')})")
     print(f"  pockets         {len(bundle['pockets'])}")
     print(f"  selection       {bundle['selection']['method']} "
           f"-> pocket {bundle['selection']['selected_pocket_index']}")
+
+    problems.extend(_check_patch(bundle))
 
     for pocket in bundle["pockets"]:
         index = pocket["index"]
@@ -60,19 +68,56 @@ def verify(path: Path, rebuild: bool = False) -> list[str]:
         if not (pocket["fpocket"]["volume_A3"] > 0):
             problems.append(f"pocket {index}: non-positive volume")
 
-    selected = bundle_mod.selected_pocket(bundle)
-    if selected["geometry"]["shape_warning"]:
-        print("  !! selected cavity is oddly shaped (envelope/equivalent-sphere "
-              "ratio out of range); the geometric comparison assumes a roughly "
-              "convex pocket")
-    if bundle["selection"]["method"] != "active_site_overlap":
-        print(f"  !! pocket was NOT selected by active-site overlap "
-              f"({bundle['selection']['method']}); the dashboard must caveat this")
+    if bundle["selection"].get("selected_pocket_index") is not None:
+        selected = bundle_mod.selected_pocket(bundle)
+        if selected["geometry"]["shape_warning"]:
+            print("  !! selected cavity is oddly shaped (envelope/equivalent-sphere "
+                  "ratio out of range); the geometric comparison assumes a roughly "
+                  "convex pocket")
+        if mode == "pocket" and bundle["selection"]["method"] != "target_site_overlap":
+            print(f"  !! cavity was NOT selected by binding-site overlap "
+                  f"({bundle['selection']['method']}); the dashboard must caveat this")
     for warning in bundle["selection"].get("warnings", []):
+        print(f"  !! {warning}")
+    for warning in bundle["preparation"].get("applied", {}).get("warnings", []):
         print(f"  !! {warning}")
 
     if rebuild:
         problems.extend(_check_rebuild(bundle))
+    return problems
+
+
+def _check_patch(bundle: dict) -> list[str]:
+    """A surface bundle's patch must be internally consistent and exposed."""
+    patch = bundle.get("patch")
+    if not patch:
+        if bundle_mod.binding_mode(bundle) == "surface":
+            return ["surface-mode bundle carries no measured patch"]
+        return []
+
+    problems = []
+    per_residue = patch.get("per_residue_area_A2", {})
+    total = sum(float(v) for v in per_residue.values())
+    stored = float(patch["patch_area_A2"])
+    if abs(total - stored) > TOLERANCE * max(1.0, abs(stored)):
+        problems.append(
+            f"patch area {stored} does not equal the sum of its per-residue "
+            f"areas ({total})"
+        )
+    if len(per_residue) != patch["n_residues"]:
+        problems.append(
+            f"patch reports {patch['n_residues']} residues but stores "
+            f"{len(per_residue)} per-residue areas"
+        )
+    print(f"  patch           {patch['n_residues']} residues, {stored:.0f} A^2, "
+          f"planarity {patch['planarity_A']:.1f} A")
+    if patch.get("buried_residue_numbers"):
+        # Configured residues with no exposed surface cannot be part of a
+        # binding face; almost always a numbering or chain mistake.
+        print(f"  !! buried binding-site residues: {patch['buried_residue_numbers']}")
+    if patch.get("shape_warning"):
+        print("  !! patch is not flat; surface-mode agreement assumes a "
+              "roughly planar face")
     return problems
 
 
@@ -81,23 +126,40 @@ def _check_rebuild(bundle: dict) -> list[str]:
     from aptarank.config import load_config
     from aptarank.tier2.build import build_target_bundle
 
+    import tempfile
+
     target = bundle["target"]
+    applied = bundle["preparation"].get("applied", {})
+    # A scratch directory, not the working tree: rebuilding is a check, and a
+    # check should not leave a second copy of the evidence lying next to the
+    # first one for someone to pick up by mistake.
+    rebuild_dir = tempfile.mkdtemp(prefix="aptarank-rebuild-")
     cfg = load_config(
         overrides={
             "tier2": {
+                "binding_mode": bundle_mod.binding_mode(bundle),
                 "target": {
-                    "pdb_id": target["pdb_id"],
+                    "id": target.get("identifier", target["pdb_id"]),
+                    "source": target.get("target_source", "pdb"),
                     "chain": target["chain_id"],
                     "model": target["model_index"],
+                    "partner_chains": applied.get("partner_chains_removed", []),
+                    "strip_hetatm": bool(applied.get("strip_hetatm", False)),
                 },
-                "bundle_dir": "bundles/_rebuild",
+                "bundle_dir": rebuild_dir,
             }
         }
     )
-    requested = bundle["selection"]["active_site"].get("requested_residues", [])
+    requested = [
+        r["residue_number"]
+        for r in bundle["preparation"].get("site_residues", [])
+    ] or [
+        r["residue_number"]
+        for r in bundle["selection"].get("target_site", {}).get("requested_residues", [])
+    ]
     if requested:
         cfg = cfg.with_overrides(
-            {"tier2": {"target": {"active_site_residues": requested}}}
+            {"tier2": {"target": {"target_site_residues": requested}}}
         )
     retained = sorted({
         r["residue_name"]
@@ -113,7 +175,39 @@ def _check_rebuild(bundle: dict) -> list[str]:
             f"{bundle['bundle_id']}: the build is not reproducible"
         ]
     print("  rebuild         identical scientific payload")
-    return []
+    return _check_volume_drift(bundle, rebuilt)
+
+
+def _check_volume_drift(original: dict, rebuilt: dict, tolerance: float = 0.10) -> list[str]:
+    """How far fpocket's Monte-Carlo volume moved between two identical builds.
+
+    The bundle id deliberately excludes this number (see bundle.py), so
+    something has to keep an eye on it: a few percent is the tool, and a large
+    jump means the two builds did not measure the same cavity after all.
+    """
+    problems, drifts = [], []
+    rebuilt_by_index = {p["index"]: p for p in rebuilt["pockets"]}
+    for pocket in original["pockets"]:
+        other = rebuilt_by_index.get(pocket["index"])
+        if other is None:
+            problems.append(f"rebuild is missing pocket {pocket['index']}")
+            continue
+        before = float(pocket["fpocket"]["volume_A3"])
+        after = float(other["fpocket"]["volume_A3"])
+        if before <= 0:
+            continue
+        drift = abs(after - before) / before
+        drifts.append(drift)
+        if drift > tolerance:
+            problems.append(
+                f"pocket {pocket['index']}: volume moved {drift:.1%} between two "
+                f"identical builds ({before:.1f} -> {after:.1f} A^3), beyond the "
+                f"{tolerance:.0%} expected from fpocket's Monte-Carlo estimate"
+            )
+    if drifts:
+        print(f"  volume drift    max {max(drifts):.1%} across {len(drifts)} pockets "
+              f"(Monte-Carlo; excluded from bundle_id by design)")
+    return problems
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -125,7 +219,11 @@ def main(argv: list[str] | None = None) -> int:
 
     failures = 0
     for pattern in args.paths:
-        for path in sorted(Path().glob(pattern)) or [Path(pattern)]:
+        # glob.glob rather than Path.glob: the documented invocation passes an
+        # absolute pattern (~/aptarank-data/cache/targets/*.bundle.json), which
+        # Path.glob refuses outright.
+        matches = [Path(p) for p in sorted(glob.glob(str(Path(pattern).expanduser())))]
+        for path in matches or [Path(pattern).expanduser()]:
             print(f"\n{path}")
             problems = verify(path, rebuild=args.rebuild)
             for problem in problems:

@@ -2,13 +2,18 @@
 
 fpocket ranks cavities by its own score, which is not guaranteed to identify
 the functionally relevant one, so this is deliberately not fully automated:
-literature-confirmed active-site residues select the pocket, and the automatic
+literature-confirmed binding-site residues select the pocket, and the automatic
 fallback is recorded in the bundle so the UI can caveat it.
 
-Zero overlap between a supplied residue list and every pocket is treated as a
-build failure by default. It is far more likely to mean a numbering, chain or
-parsing mismatch than a genuine finding, and silently falling back to the
-top-scoring pocket would hide that.
+"Binding site", not "active site": an active site is an enzyme's catalytic
+machinery, and most aptamer targets are not enzymes. The old name quietly
+implied the tool only worked on enzymes.
+
+In pocket mode, zero overlap between a supplied residue list and every cavity is
+a build failure. It is far more likely to mean a numbering, chain or parsing
+mismatch than a genuine finding, and silently falling back to the top-scoring
+cavity would hide that. In surface mode the patch is the evidence and a cavity
+is only a cross-reference, so the same situation is expected and merely noted.
 """
 
 from __future__ import annotations
@@ -29,7 +34,7 @@ TIE_BREAK_ORDER = (
 
 @dataclass(frozen=True)
 class ResidueSpec:
-    """A requested active-site residue. Name is validation, not identity."""
+    """A requested binding-site residue. Name is validation, not identity."""
 
     chain_id: str
     residue_number: int
@@ -78,10 +83,29 @@ def select_pocket(
     requested: Sequence[ResidueSpec] = (),
     structure_residues: Sequence[Residue] = (),
     allow_zero_overlap_fallback: bool = False,
+    require_overlap: bool = True,
 ) -> dict[str, Any]:
     """Choose the pocket and record the full evidence for that choice."""
     if not pockets:
-        raise TargetError("cannot select a pocket: fpocket detected none")
+        if require_overlap:
+            raise TargetError("cannot select a pocket: fpocket detected none")
+        return {
+            "status": "not_applicable",
+            "method": "no_cavity_detected",
+            "selected_pocket_index": None,
+            "target_site": {
+                "requested": bool(requested),
+                "requested_residues": [spec.to_dict() for spec in requested],
+                "n_requested": len(requested),
+                "total_overlap": 0,
+            },
+            "pocket_evidence": [],
+            "tie_break_order": list(TIE_BREAK_ORDER),
+            "warnings": [
+                "no cavity was detected on this target; in surface mode the "
+                "measured patch is the evidence and no cavity is needed"
+            ],
+        }
 
     present = {r.key() for r in structure_residues}
     missing = [spec for spec in requested if structure_residues and spec.key() not in present]
@@ -89,7 +113,7 @@ def select_pocket(
         # A residue that is not in the cleaned structure at all cannot overlap
         # anything, and almost always means the wrong chain or numbering.
         raise TargetError(
-            f"{len(missing)} configured active-site residue(s) are absent from the "
+            f"{len(missing)} configured binding-site residue(s) are absent from the "
             f"prepared structure: "
             f"{[f'{s.chain_id}{s.residue_number}{s.insertion_code}' for s in missing[:6]]}. "
             f"Check the chain selector and the residue numbering scheme."
@@ -99,7 +123,11 @@ def select_pocket(
     evidence = []
     for pocket in pockets:
         lining = {r.key(): r for r in pocket.lining_residues}
-        overlapping = [lining[key] for key in wanted & set(lining)]
+        # sorted(), because iterating a set intersection gives an order that
+        # varies between processes (string hashing is randomised per run). The
+        # residues would be the same but the recorded evidence would differ, and
+        # anything hashing this bundle would call two identical builds different.
+        overlapping = [lining[key] for key in sorted(wanted & set(lining))]
         evidence.append(
             {
                 "pocket_index": pocket.index,
@@ -115,26 +143,28 @@ def select_pocket(
     total_overlap = sum(item["overlap_count"] for item in evidence)
 
     if requested and total_overlap == 0:
-        if not allow_zero_overlap_fallback:
+        if require_overlap and not allow_zero_overlap_fallback:
             raise TargetError(
-                f"none of the {len(requested)} configured active-site residues line "
-                f"any of the {len(pockets)} detected pockets. This usually means a "
+                f"none of the {len(requested)} configured binding-site residues line "
+                f"any of the {len(pockets)} detected cavities. This usually means a "
                 f"numbering, chain or preparation mismatch rather than a real "
                 f"result. Set tier2.target.allow_zero_overlap_fallback to accept "
                 f"automatic selection instead."
             )
-        method = "active_site_zero_overlap_fallback"
+        method = "target_site_zero_overlap_fallback"
         warnings.append(
-            "active-site residues were supplied but overlapped no pocket; "
+            "binding-site residues were supplied but overlapped no cavity; "
             "selection fell back to the highest fpocket score and must NOT be "
-            "described as active-site selected"
+            "described as binding-site selected"
+            + ("" if require_overlap else
+               " (expected in surface mode, where the patch is the evidence)")
         )
     elif requested:
-        method = "active_site_overlap"
+        method = "target_site_overlap"
     else:
         method = "automatic_fpocket_score"
         warnings.append(
-            "no active-site residues configured; the pocket was chosen by fpocket "
+            "no binding-site residues configured; the cavity was chosen by fpocket "
             "score alone, which is not guaranteed to be the functional cavity"
         )
 
@@ -154,9 +184,10 @@ def select_pocket(
         "status": "selected",
         "method": method,
         "selected_pocket_index": chosen["pocket_index"],
-        "active_site": {
+        "target_site": {
             "requested": bool(requested),
             "allow_zero_overlap_fallback": allow_zero_overlap_fallback,
+            "require_overlap": require_overlap,
             "requested_residues": [spec.to_dict() for spec in requested],
             "n_requested": len(requested),
             "total_overlap": total_overlap,

@@ -85,7 +85,7 @@ fi
 log "Installing AptaRank"
 # [dev] as well as [dashboard]: the install verifies itself by running the test
 # suite, and refusing to start a service whose tests fail is the point.
-"$PY" -m pip install --quiet -e "$APP_DIR[dashboard,dev]"
+"$PY" -m pip install --quiet -e "$APP_DIR[dashboard,dev,electrostatics]"
 ok "AptaRank installed"
 
 # -- 4. fpocket, so Tier 2 works on real structures ----------------------
@@ -108,6 +108,41 @@ if ! command -v fpocket >/dev/null 2>&1 && [ ! -x "$LOCAL_BIN/fpocket" ]; then
     rm -rf "$work"
 else
     ok "fpocket present: $(command -v fpocket || echo "$LOCAL_BIN/fpocket")"
+fi
+
+# -- 4b. APBS, for surface-mode charge complementarity -------------------
+#
+# Optional by design: without it, surface mode still scores on size and records
+# the charge term as "not computed" rather than failing. The release tarball
+# ships its own shared libraries, so it is wrapped rather than symlinked.
+
+APBS_VERSION="${APBS_VERSION:-3.4.1}"
+if ! command -v apbs >/dev/null 2>&1 && [ ! -x "$LOCAL_BIN/apbs" ]; then
+    log "Installing APBS $APBS_VERSION"
+    mkdir -p "$LOCAL_BIN"
+    work="$(mktemp -d)"
+    url="https://github.com/Electrostatics/apbs/releases/download/v${APBS_VERSION}/APBS-${APBS_VERSION}.Linux.zip"
+    if curl -fsSL -o "$work/apbs.zip" "$url" && unzip -q "$work/apbs.zip" -d "$work"; then
+        rm -rf "$HOME/.local/apbs-$APBS_VERSION"
+        mv "$work/APBS-${APBS_VERSION}.Linux" "$HOME/.local/apbs-$APBS_VERSION"
+        chmod +x "$HOME/.local/apbs-$APBS_VERSION"/bin/* 2>/dev/null || true
+        cat > "$LOCAL_BIN/apbs" <<APBSWRAP
+#!/usr/bin/env bash
+# Written by deploy/server_install.sh. The APBS release ships its own shared
+# libraries; without this wrapper it only runs from its own directory.
+APBS_HOME="\$HOME/.local/apbs-$APBS_VERSION"
+export LD_LIBRARY_PATH="\$APBS_HOME/lib:\${LD_LIBRARY_PATH:-}"
+exec "\$APBS_HOME/bin/apbs" "\$@"
+APBSWRAP
+        chmod 0755 "$LOCAL_BIN/apbs"
+        ok "apbs -> $LOCAL_BIN/apbs ($("$LOCAL_BIN/apbs" --version 2>&1 | head -1))"
+    else
+        warn "APBS download failed; surface mode will score on size only and"
+        warn "record the charge term as 'not computed'."
+    fi
+    rm -rf "$work"
+else
+    ok "apbs present: $(command -v apbs || echo "$LOCAL_BIN/apbs")"
 fi
 
 # -- 5. server configuration ---------------------------------------------
@@ -151,7 +186,7 @@ warnings.filterwarnings("ignore")
 # what the code actually uses, not a package that would fail for a reason that
 # cannot affect us.
 names = ("aptarank", "RNA", "forgi.graph.bulge_graph", "ushuffle", "Bio",
-         "streamlit", "altair", "pytest")
+         "freesasa", "streamlit", "altair", "pytest")
 missing = []
 for name in names:
     try:
@@ -159,6 +194,11 @@ for name in names:
     except Exception as exc:
         missing.append(f"{name} ({exc.__class__.__name__})")
 print("    fpocket   ", shutil.which("fpocket") or "not on PATH")
+# Surface-mode charge complementarity only. Absent is a downgrade, not a
+# failure: the size signal still works and the artifact says charge was not
+# computed.
+print("    apbs      ", shutil.which("apbs") or "not on PATH (surface mode scores size only)")
+print("    pdb2pqr   ", shutil.which("pdb2pqr30") or "module only")
 if missing:
     print("    MISSING   ", ", ".join(missing))
     sys.exit(1)

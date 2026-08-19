@@ -1,0 +1,8 @@
+target_name: IGFBP3
+source: pdb
+id: 7WRQ
+chain: B
+binding_mode: surface
+partner_chain: C
+strip_hetatm: true
+target_site_residues: [7, 8, 9, 10, 11, 12, 38, 40, 55, 56, 57, 75, 76, 77, 78, 80, 81, 187, 190, 194, 205, 210, 211, 212, 213, 214, 215, 224, 225, 226, 227]

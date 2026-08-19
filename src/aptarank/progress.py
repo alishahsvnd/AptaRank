@@ -36,9 +36,10 @@ RUN_FAILED = "run_failed"
 STAGE_LABELS = {
     "ingest": "Reading and checking sequences",
     "corpus": "Preparing the reference library",
-    "tier1": "Scoring intrinsic structure",
+    "tier1": "Scoring aptamer-likeness",
+    "target": "Preparing the protein target",
     "bank": "Calibrating against shuffled controls",
-    "tier2": "Comparing shapes with the target cavity",
+    "tier2": "Checking aptamer-target compatibility",
     "diagrams": "Drawing structure diagrams",
     "artifact": "Writing results",
 }

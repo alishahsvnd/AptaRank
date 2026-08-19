@@ -44,9 +44,13 @@ FEATURE_COLUMNS = (
     "longest_stem_bp",
     "max_loop_nt",
     "total_unpaired",
+    "radius_of_gyration_A",
 )
 
-ENSEMBLE_COLUMNS = ("loop_nt_median", "loop_nt_p90", "loop_nt_iqr", "n_ensemble_samples")
+ENSEMBLE_COLUMNS = (
+    "loop_nt_median", "loop_nt_p90", "loop_nt_iqr", "rg_median_A", "rg_iqr_A",
+    "n_ensemble_samples",
+)
 
 
 @dataclass(frozen=True)
@@ -59,6 +63,10 @@ class FeatureJob:
     n_shuffles: int = 0
     shuffle_k: int = 2
     seed: int = 0
+    #: Nucleic-acid geometry, carried from `tier2.geometry` so the config stays
+    #: the single source of truth even inside a worker process.
+    a_per_bp_helix: float = 2.8
+    a_per_nt_ss: float = 6.0
 
 
 def gc_fraction(sequence: str) -> float:
@@ -69,11 +77,17 @@ def gc_fraction(sequence: str) -> float:
 
 
 def sequence_features(
-    sequence: str, n_ensemble_samples: int = 0, seed: int | None = None
+    sequence: str,
+    n_ensemble_samples: int = 0,
+    seed: int | None = None,
+    a_per_bp_helix: float = 2.8,
+    a_per_nt_ss: float = 6.0,
 ) -> dict[str, Any]:
     """Everything computable from one sequence without the corpus or a target."""
     fold_result, samples = folding.fold_and_sample(sequence, n_ensemble_samples, seed)
-    elems = element_mod.parse_elements(fold_result.dot_bracket, sequence)
+    elems = element_mod.parse_elements(
+        fold_result.dot_bracket, sequence, a_per_bp_helix, a_per_nt_ss
+    )
 
     record: dict[str, Any] = {
         "sequence": sequence,
@@ -83,7 +97,11 @@ def sequence_features(
         **elems.feature_dict(),
         "element_string": elems.element_string,
     }
-    record.update(ensemble_loop_stats(samples, fallback=elems.max_loop_nt))
+    record.update(
+        ensemble_structure_stats(
+            samples, elems, a_per_bp_helix=a_per_bp_helix, a_per_nt_ss=a_per_nt_ss
+        )
+    )
 
     # A non-finite feature must fail its candidate here rather than reach the
     # percentile scorer, where NaN would silently become a plausible-looking
@@ -97,36 +115,67 @@ def sequence_features(
     return record
 
 
-def ensemble_loop_stats(samples: Sequence[str], fallback: int) -> dict[str, Any]:
-    """Loop-size distribution over sampled structures (spec §4.7).
+def ensemble_structure_stats(
+    samples: Sequence[str],
+    mfe_elements: Any,
+    a_per_bp_helix: float = 2.8,
+    a_per_nt_ss: float = 6.0,
+) -> dict[str, Any]:
+    """Shape statistics over sampled structures (spec §4.7).
 
-    Tier 2 consumes `loop_nt_median` rather than the single MFE structure's
-    loop size: real molecules move between shapes, and a distribution statistic
-    is a more honest input to an already-coarse geometric comparison.
-    `loop_nt_iqr` says how uncertain that number itself is.
+    Tier 2 consumes these rather than the single MFE structure's numbers: real
+    molecules move between shapes, and a distribution statistic is a more honest
+    input to an already-coarse geometric comparison. The `_iqr` figures say how
+    uncertain each number is.
+
+    One parse per sampled structure serves both: the loop size pocket mode needs
+    and the overall size surface mode needs.
     """
     if not samples:
         return {
-            "loop_nt_median": float(fallback),
-            "loop_nt_p90": float(fallback),
+            "loop_nt_median": float(mfe_elements.max_loop_nt),
+            "loop_nt_p90": float(mfe_elements.max_loop_nt),
             "loop_nt_iqr": 0.0,
+            "rg_median_A": float(mfe_elements.radius_of_gyration_A),
+            "rg_iqr_A": 0.0,
             "n_ensemble_samples": 0,
         }
-    sizes = np.array([element_mod.max_loop_nt(db) for db in samples], dtype=float)
-    q25, q75 = np.percentile(sizes, [25, 75])
+
+    parsed = [
+        element_mod.parse_elements(db, None, a_per_bp_helix, a_per_nt_ss)
+        for db in samples
+    ]
+    sizes = np.array([e.max_loop_nt for e in parsed], dtype=float)
+    radii = np.array([e.radius_of_gyration_A for e in parsed], dtype=float)
+    loop_q25, loop_q75 = np.percentile(sizes, [25, 75])
+    rg_q25, rg_q75 = np.percentile(radii, [25, 75])
     return {
         "loop_nt_median": float(np.median(sizes)),
         "loop_nt_p90": float(np.percentile(sizes, 90)),
-        "loop_nt_iqr": float(q75 - q25),
+        "loop_nt_iqr": float(loop_q75 - loop_q25),
+        "rg_median_A": float(np.median(radii)),
+        "rg_iqr_A": float(rg_q75 - rg_q25),
         "n_ensemble_samples": int(sizes.size),
     }
 
 
-def shuffle_features(sequence: str, n: int, k: int, seed: int) -> list[dict[str, Any]]:
+def shuffle_features(
+    sequence: str,
+    n: int,
+    k: int,
+    seed: int,
+    a_per_bp_helix: float = 2.8,
+    a_per_nt_ss: float = 6.0,
+) -> list[dict[str, Any]]:
     """Fold each shuffled control. No ensemble sampling — too expensive (§4.8)."""
     out = []
     for i, shuffled in enumerate(shuffles.generate_shuffles(sequence, n, k, seed)):
-        record = sequence_features(shuffled, n_ensemble_samples=0)
+        record = sequence_features(
+            shuffled,
+            n_ensemble_samples=0,
+            a_per_bp_helix=a_per_bp_helix,
+            a_per_nt_ss=a_per_nt_ss,
+        )
         record["shuffle_index"] = i
         out.append(record)
     return out
@@ -142,12 +191,16 @@ def run_job(job: FeatureJob) -> dict[str, Any]:
             job.sequence,
             n_ensemble_samples=job.n_ensemble_samples,
             seed=derive_seed(job.seed, job.candidate_id, job.sequence, "ensemble"),
+            a_per_bp_helix=job.a_per_bp_helix,
+            a_per_nt_ss=job.a_per_nt_ss,
         )
         controls = shuffle_features(
             job.sequence,
             job.n_shuffles,
             job.shuffle_k,
             derive_seed(job.seed, job.candidate_id, job.sequence, "shuffle"),
+            a_per_bp_helix=job.a_per_bp_helix,
+            a_per_nt_ss=job.a_per_nt_ss,
         )
         return {
             "candidate_id": job.candidate_id,

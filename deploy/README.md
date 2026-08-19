@@ -15,8 +15,9 @@ git push ───────────────────────�
                                        .venv/            its own Python environment
                                      ~/aptarank-data/    runs, uploads, caches, libraries
                                      ~/.local/bin/fpocket
+                                     ~/.local/bin/apbs   (+ ~/.local/apbs-3.4.1)
 
-browser ◄── ssh tunnel ────────────► 127.0.0.1:8501      Streamlit, loopback only
+browser ◄── ssh tunnel ────────────► 127.0.0.1:8510      Streamlit, loopback only
 ```
 
 Three decisions worth knowing:
@@ -95,23 +96,40 @@ Put a validated corpus at `~/aptarank-data/data/corpus/<name>.csv`, with a
 Without that manifest the library still works, but the dashboard marks it
 "provenance not recorded" — correct columns are not provenance.
 
-Build target evidence on the server, where fpocket is available:
+Targets are prepared on the server, where fpocket and APBS are available. Users
+can do this from the dashboard by giving an identifier, a chain and a binding
+mode; to prepare one ahead of a demo, or to review it before anyone uses it:
 
 ```bash
 cd ~/aptarank && .venv/bin/python -m aptarank target build \
-    --pdb-id 3SPU --chain A \
-    --set 'tier2.target.active_site_residues=[120,122,189]' \
-    --set 'tier2.target.retain_hetero_resnames=["ZN"]' \
-    -o ~/aptarank-data/cache/targets
-.venv/bin/python scripts/verify_target_bundle.py ~/aptarank-data/cache/targets/3SPU_*.bundle.json
+    -c configs/server.yaml --target-file igfbp3.txt
+.venv/bin/python scripts/verify_target_bundle.py \
+    ~/aptarank-data/cache/targets/7WRQ_*.bundle.json --rebuild
 ```
 
-Review the output — chain, retained hetero groups, which cavity was selected
-and why — before letting anyone use it. Bundle creation stays a deliberate step
-rather than a button: a PDB ID alone does not settle the model, the chain, which
-ligands to keep, or which cavity is the functional one, and one-click generation
-would produce persuasive-looking evidence from decisions the biologist never
-knew they made.
+where `igfbp3.txt` is the target description (R§3.2):
+
+```yaml
+target_name: IGFBP3
+source: pdb
+id: 7WRQ
+chain: B
+binding_mode: surface
+partner_chain: C
+strip_hetatm: true
+target_site_residues: [7, 8, 9, 12, 38, 55, 57, 75, 187, 210, 225, 227]
+```
+
+Review the output — chain, partner chains removed, retained hetero groups, the
+measured binding site — before letting anyone use it. **The binding mode is an
+assertion, not a measurement**: the tool compares the geometry appropriate to
+the mode it is told, and cannot tell you it was told the wrong one. A pocket
+mode run needs residues only to pick the cavity; a surface mode run cannot
+proceed without them, because they define the patch it measures.
+
+`--rebuild` prepares the target a second time and requires an identical bundle
+id. It also reports how far fpocket's Monte-Carlo volume estimate moved between
+the two builds — a few percent is the tool, more than 10% is a problem.
 
 For numbers that go in the paper, prefer bundles from the pinned CI workflow
 (`.github/workflows/target-bundle.yml`); the server is for exploration.

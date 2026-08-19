@@ -113,9 +113,9 @@ def main() -> None:
 
     selection = {
         "status": "selected",
-        "method": "active_site_overlap",
+        "method": "target_site_overlap",
         "selected_pocket_index": 1,
-        "active_site": {
+        "target_site": {
             "requested": True, "allow_zero_overlap_fallback": False,
             "requested_residues": [
                 {"chain_id": "A", "residue_number": r, "insertion_code": "", "residue_name": None}
@@ -144,6 +144,9 @@ def main() -> None:
             "command": [], "exit_code": None,
         },
         synthetic=True,
+        # The fabricated cavity is a pocket-mode target: there is no real
+        # surface to measure, so surface mode is deliberately not offered here.
+        binding_mode="pocket",
     )
     path = bundle_mod.write(result, args.output_dir)
     selected = bundle_mod.selected_pocket(result)

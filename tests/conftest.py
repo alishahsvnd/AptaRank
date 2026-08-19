@@ -95,9 +95,9 @@ def make_synthetic_bundle(tmp_path, d_pocket_target: float = 24.0):
 
     selection_payload = {
         "status": "selected",
-        "method": "active_site_overlap",
+        "method": "target_site_overlap",
         "selected_pocket_index": 1,
-        "active_site": {"requested": True, "allow_zero_overlap_fallback": False,
+        "target_site": {"requested": True, "allow_zero_overlap_fallback": False,
                         "requested_residues": [], "n_requested": 3, "total_overlap": 3},
         "pocket_evidence": [
             {"pocket_index": p.index, "overlap_count": 3 if p.index == 1 else 0,
@@ -119,9 +119,100 @@ def make_synthetic_bundle(tmp_path, d_pocket_target: float = 24.0):
     )
 
 
+def make_surface_bundle(tmp_path, patch_area_A2: float = 1440.0,
+                        mean_potential_kT_per_e: float = 6.0):
+    """A valid surface-mode target bundle, built without fpocket or freeSASA.
+
+    Surface mode measures a patch of named residues rather than a cavity, so a
+    surface bundle carries a `patch` section and needs no selected pocket.
+    """
+    from aptarank.tier2 import bundle as bundle_mod
+
+    clean = tmp_path / "TEST_A_clean.pdb"
+    clean.write_text(
+        "ATOM      1  CA  ALA A  12       0.000   0.000   0.000\n", encoding="utf-8"
+    )
+    residues = [12, 13, 14, 15]
+
+    class _Prepared:
+        pdb_id = identifier = "TEST"
+        name = "synthetic surface test target"
+        model_index = 0
+        chain_id = "A"
+        path = clean
+        structure_kind = "experimental"
+        source_kind = "pdb"
+        source = {"url": "synthetic", "format": "pdb", "sha256": "0" * 64, "size_bytes": 1}
+        applied = {
+            "input_atom_count": 1, "output_atom_count": 1,
+            "output_protein_residue_count": 1, "removed_water_residue_count": 0,
+            "hetero_summary": [], "retained_hetero_residues": [],
+            "altloc_policy": "first_altloc_only", "was_multi_chain": True,
+            "chains_removed": ["B"], "partner_chains_removed": ["B"], "warnings": [],
+        }
+        site_residues = [
+            type("R", (), {"to_dict": lambda self, n=n: {
+                "chain_id": "A", "residue_number": n, "insertion_code": "",
+                "residue_name": "ALA", "record_type": "ATOM"}})()
+            for n in residues
+        ]
+        partner_evidence = {"partner_chains": ["B"], "computed": True,
+                            "n_interface_residues": len(residues),
+                            "configured_not_in_interface": []}
+
+    patch = {
+        "algorithm": "residue-patch-sasa-v1",
+        "definition": "selected_residues",
+        "n_residues": len(residues),
+        "n_atoms": 4 * len(residues),
+        "residue_numbers": residues,
+        "patch_area_A2": patch_area_A2,
+        "per_residue_area_A2": {str(n): patch_area_A2 / len(residues) for n in residues},
+        "centroid_A": [0.0, 0.0, 0.0],
+        "extents_A": [20.0, 18.0, 6.0],
+        "planarity_A": 6.0,
+        "elongation": 1.4,
+        "buried_residue_numbers": [],
+        "shape_warning": False,
+        "total_chain_area_A2": patch_area_A2 * 4,
+    }
+    sampling = {
+        "label": "binding_site_patch", "n_points_requested": 16,
+        "n_points_inside_grid": 16,
+        "mean_potential_kT_per_e": mean_potential_kT_per_e,
+        "median_potential_kT_per_e": mean_potential_kT_per_e,
+        "electrostatic_compatible": mean_potential_kT_per_e > 0,
+    }
+
+    return bundle_mod.build(
+        prepared=_Prepared(),
+        pockets=[],
+        geometries={},
+        selection={
+            "status": "not_applicable", "method": "no_cavity_detected",
+            "selected_pocket_index": None,
+            "target_site": {"requested": True, "requested_residues": [],
+                            "n_requested": len(residues), "total_overlap": 0},
+            "pocket_evidence": [], "tie_break_order": [], "warnings": [],
+        },
+        fpocket_provenance={"status": "skipped", "version": None,
+                            "command": None, "exit_code": None},
+        electrostatics={"requested": True, "status": "success", "reason_code": None,
+                        "message": None, "pdb2pqr": None, "apbs": None, "grid": None,
+                        "sampling": sampling, "selected_pocket_sampling": sampling},
+        binding_mode="surface",
+        patch=patch,
+    )
+
+
 @pytest.fixture
 def synthetic_bundle(tmp_path):
     return make_synthetic_bundle(tmp_path)
+
+
+@pytest.fixture
+def surface_bundle(tmp_path):
+    return make_surface_bundle(tmp_path)
 
 
 @pytest.fixture

@@ -91,7 +91,9 @@ def test_spearman_diagnostic_is_computed_every_run(tier2_run):
 def test_thresholds_and_bank_provenance_are_stored(tier2_run):
     thresholds = tier2_run.artifact["tier2_thresholds"]
     assert thresholds["n_controls"] > 0
-    assert thresholds["descriptor"] == "flexible"
+    assert thresholds["binding_mode"] == "pocket"
+    assert thresholds["units"] == "A"
+    assert thresholds["parameters"]["primary_descriptor"] == "flexible"
     assert thresholds["calibration_bank"]["corpus_is_placeholder"] is True
 
 

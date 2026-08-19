@@ -31,7 +31,7 @@ def test_stage_events_carry_a_plain_language_label(tmp_path):
     with ProgressReporter(fmt="jsonl", path=path) as reporter:
         reporter.stage_started("tier1")
     record = json.loads(path.read_text(encoding="utf-8").strip())
-    assert record["message"] == "Scoring intrinsic structure"
+    assert record["message"] == "Scoring aptamer-likeness"
 
 
 def test_advance_is_throttled_but_never_drops_the_final_update(tmp_path):

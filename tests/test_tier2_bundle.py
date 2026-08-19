@@ -67,11 +67,64 @@ def test_summary_exposes_what_the_artifact_needs(synthetic_bundle):
     summary = bundle_mod.summary(synthetic_bundle)
     assert summary["pdb_id"] == "TEST"
     assert summary["n_pockets"] == 2
-    assert summary["pocket_selection"] == "active_site_overlap"
+    assert summary["pocket_selection"] == "target_site_overlap"
     assert summary["selected_pocket"]["d_pocket_A"] > 0
     assert summary["electrostatics_status"] == "skipped"
 
 
 def test_find_reports_a_useful_error_when_no_bundle_exists(tmp_path):
-    with pytest.raises(TargetError, match="Build one on Linux"):
+    with pytest.raises(TargetError, match="Prepare one with"):
         bundle_mod.find(tmp_path, "3SPU")
+
+
+def test_the_bundle_id_survives_fpockets_monte_carlo_volume(tmp_path):
+    """fpocket re-estimates cavity volume stochastically and offers no seed.
+
+    Two honest builds of identical evidence must still agree on the id, or the
+    id certifies nothing. The volume itself is kept as measured.
+    """
+    from tests.conftest import make_synthetic_bundle
+
+    bundle = make_synthetic_bundle(tmp_path)
+    original = bundle["bundle_id"]
+
+    # Same cavity, measured again: volume wobbles a few percent, and everything
+    # derived from it moves with it.
+    for pocket in bundle["pockets"]:
+        pocket["fpocket"]["volume_A3"] *= 1.04
+        pocket["geometry"]["d_equiv_A"] *= 1.013
+        pocket["geometry"]["envelope_to_equiv_ratio"] *= 0.987
+    assert bundle_mod.compute_bundle_id(bundle) == original
+
+
+def test_a_changed_alpha_sphere_still_changes_the_id(tmp_path):
+    """The exclusion must be narrow: real evidence stays covered."""
+    from tests.conftest import make_synthetic_bundle
+
+    bundle = make_synthetic_bundle(tmp_path)
+    original = bundle["bundle_id"]
+    bundle["pockets"][0]["alpha_spheres"][0]["radius_A"] += 0.5
+    assert bundle_mod.compute_bundle_id(bundle) != original
+
+    # As does the quantity every pocket-mode band is computed from.
+    bundle = make_synthetic_bundle(tmp_path)
+    bundle["pockets"][0]["geometry"]["d_pocket_A"] += 0.1
+    assert bundle_mod.compute_bundle_id(bundle) != bundle["bundle_id"]
+
+
+def test_a_bundle_declares_which_fields_its_id_does_not_cover(tmp_path):
+    from tests.conftest import make_synthetic_bundle
+
+    bundle = make_synthetic_bundle(tmp_path)
+    assert "pockets[].fpocket.volume_A3" in bundle["nondeterministic_fields"]
+
+
+def test_dropping_a_nondeterministic_field_is_not_the_same_as_carrying_one(tmp_path):
+    """Blanked, not deleted: an omitted volume must not hash as a present one."""
+    from tests.conftest import make_synthetic_bundle
+
+    bundle = make_synthetic_bundle(tmp_path)
+    stripped = json.loads(json.dumps(bundle))
+    for pocket in stripped["pockets"]:
+        pocket["fpocket"].pop("volume_A3")
+    assert bundle_mod.compute_bundle_id(stripped) != bundle["bundle_id"]
